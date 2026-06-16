@@ -47,9 +47,16 @@ function appendAttendanceLog_(payload) {
     sheet = ss.getSheets()[0];
   }
 
-  var headers = ['Timestamp', 'Category', 'Flat No', 'Name', 'Gender', 'Student ID', 'Direction', 'Subscription'];
+  var headers = ['Timestamp', 'Category', 'Flat No', 'Name', 'Gender', 'Student ID', 'Direction', 'Subscription', 'Amenity'];
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    // Migrate older sheets that pre-date the Amenity column: add the header
+    // if it's missing so the new value lands under a labelled column.
+    var existing = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    if (existing.indexOf('Amenity') === -1) {
+      sheet.getRange(1, headers.length, 1, 1).setValue('Amenity');
+    }
   }
 
   var r = payload.row || {};
@@ -61,7 +68,8 @@ function appendAttendanceLog_(payload) {
     r.gender || '',
     r.student_id || '',
     r.direction || '',
-    r.subscription || ''
+    r.subscription || '',
+    r.amenity || ''
   ]);
 
   return jsonResponse_(true, { appended: 1 }, null);

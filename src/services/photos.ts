@@ -9,9 +9,8 @@ import {
 } from 'expo-file-system/legacy';
 import JSZip from 'jszip';
 
-import { type Student } from './storage';
 
-// Face photos extracted from the Drive ZIP live here, named "<StudentID>.jpg".
+// Face photos extracted from the Drive ZIP live here, named "<FlatNo>.jpg".
 const PHOTOS_DIR = `${documentDirectory}student_photos`;
 
 function isImageFile(name: string): boolean {
@@ -67,10 +66,14 @@ export async function importPhotosFromBase64(
 }
 
 /**
- * Populate local_photo on each student from the extracted files (name === id).
+ * Populate local_photo on each item from the extracted files, matching the
+ * file stem (case-insensitive) against a key derived from each item.
  * Mirrors IDCHECKER's attachLocalPhotosById.
  */
-export async function attachLocalPhotosById(students: Student[]): Promise<Student[]> {
+export async function attachLocalPhotos<T extends { local_photo?: string }>(
+  items: T[],
+  getKey: (item: T) => string,
+): Promise<T[]> {
   const dir = await ensurePhotosDir();
   const names = (await readDirectoryAsync(dir)).filter(isImageFile);
 
@@ -78,9 +81,9 @@ export async function attachLocalPhotosById(students: Student[]): Promise<Studen
   const byStem = new Map<string, string>();
   for (const n of names) byStem.set(getFileStem(n).toLowerCase(), n);
 
-  return students.map((s) => {
-    const match = byStem.get(s.id.trim().toLowerCase());
-    return match ? { ...s, local_photo: `${dir}/${match}` } : s;
+  return items.map((item) => {
+    const match = byStem.get((getKey(item) || '').trim().toLowerCase());
+    return match ? { ...item, local_photo: `${dir}/${match}` } : item;
   });
 }
 

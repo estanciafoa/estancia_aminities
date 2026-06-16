@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { postAttendanceLog, type AttendanceLogRow } from './sheets';
+import { getDeployedAmenity } from './storage';
 
 const QUEUE_KEY = '@estancia_amenities_log_queue';
 
@@ -26,8 +27,11 @@ async function writeQueue(items: QueuedLog[]): Promise<void> {
  */
 export async function enqueueLog(row: AttendanceLogRow): Promise<void> {
   const queue = await readQueue();
+  // The amenity logged is always the one this device gates, captured now.
+  const amenity = row.amenity || (await getDeployedAmenity()).toUpperCase();
   queue.push({
     ...row,
+    amenity,
     qid: `${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
     timestamp: new Date().toISOString(),
   });

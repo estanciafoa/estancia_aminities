@@ -1,12 +1,13 @@
-import { attachLocalPhotosById, importPhotosFromBase64 } from './photos';
-import { saveLocalStudents, setLastSyncTime, type Student } from './storage';
+import { attachLocalPhotos, importPhotosFromBase64 } from './photos';
+import { saveLocalStudents, saveRoster, setLastSyncTime, type RosterEntry, type Student } from './storage';
 
 // Deployed Apps Script web app that proxies the (private) Google Sheet.
 // It exposes a `get_csv` action guarded by a token. See README for redeploy steps.
 const APPS_SCRIPT_URL =
   'https://script.google.com/macros/s/AKfycby2yjp7UEvBdYIDzKjOyFInegp_9CA7LVhpmbHbqwnxdPYEI5WJE8BYki-3Dwrgfm7pkw/exec';
 const SHEET_TOKEN = 'Admin2026';
-const STUDENTS_GID = '716123554';
+const STUDENTS_GID = '716123554'; // subscription details tab (Flat No → Paid for)
+const ROSTER_GID = '0'; // "Student id" tab (Student ID → Name/Flat), photos by ID
 
 // In/out attendance log lives in a separate spreadsheet, written via a
 // dedicated (write-only) Apps Script deployment. Reads stay on APPS_SCRIPT_URL.
@@ -26,6 +27,8 @@ export interface AttendanceLogRow {
   direction: Direction;
   // Decision/status: PAID | WARN | REGISTER | DENIED | NA (Guest) | '' (checkout)
   subscription: string;
+  // Amenity this device gates (gym/pool/tennis). Auto-filled at enqueue time.
+  amenity?: string;
 }
 
 /**
@@ -67,6 +70,7 @@ export interface LogRow {
   student_id: string;
   direction: string;
   subscription: string;
+  amenity: string;
 }
 
 /** Read the full attendance log via the read proxy (for report export). */
@@ -89,6 +93,7 @@ export async function fetchLogRows(): Promise<LogRow[]> {
     student_id: getCol(r, 'Student ID', 'StudentID'),
     direction: getCol(r, 'Direction'),
     subscription: getCol(r, 'Subscription'),
+    amenity: getCol(r, 'Amenity'),
   }));
 }
 
@@ -150,11 +155,11 @@ async function fetchFacesZipBase64(): Promise<string> {
   return raw;
 }
 
-/** Fetch the students sheet CSV through the Apps Script proxy. */
-async function fetchStudentCsv(): Promise<Record<string, string>[]> {
+/** Fetch any tab's CSV (by gid) through the Apps Script proxy. */
+async function fetchCsvByGid(gid: string): Promise<Record<string, string>[]> {
   const url =
     `${APPS_SCRIPT_URL}?action=get_csv` +
-    `&gid=${encodeURIComponent(STUDENTS_GID)}` +
+    `&gid=${encodeURIComponent(gid)}` +
     `&token=${encodeURIComponent(SHEET_TOKEN)}`;
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) throw new Error('Fetch failed: ' + res.status);
@@ -173,12 +178,9 @@ async function fetchStudentCsv(): Promise<Record<string, string>[]> {
 
 /**
  * Pull the Google Sheet into the local database.
- * Sheet columns: Name, Flat No, Month, Student ID, Status.
- * Returns the number of students stored.
- */
-/**
- * Pull the Google Sheet into the local database.
- * Sheet columns: Name, Flat No, Month, ID/Student ID, Status, Type.
+ * Sheet columns: Flat No, Name, Month, Type, Paid for, Status.
+ * Identity is the Flat No (the sheet has no per-person ID); "Paid for" is a
+ * single amenity per row (a flat may have several rows for several amenities).
  *
  * @param opts.photos when true (default), also download the faces ZIP from
  *   Drive and extract photos. Pass { photos: false } to sync ONLY the
@@ -188,46 +190,61 @@ async function fetchStudentCsv(): Promise<Record<string, string>[]> {
  */
 export async function syncStudents(opts: { photos?: boolean } = {}): Promise<number> {
   const includePhotos = opts.photos ?? true;
-  const rows = await fetchStudentCsv();
-  let students: Student[] = [];
-  for (const row of rows) {
-    const id = getCol(row, 'ID', 'Id', 'Student ID', 'StudentID');
-    if (!id) continue;
-    const amenities = getCol(row, 'Subscription', 'Subscriptions', 'Amenity', 'Amenities')
-      .split(',')
-      .map((a) => a.trim().toLowerCase())
-      .filter(Boolean);
+
+  // 1) Subscription details (Flat No → Paid for) — the gating data.
+  const subRows = await fetchCsvByGid(STUDENTS_GID);
+  const students: Student[] = [];
+  for (const row of subRows) {
+    const flat = getCol(row, 'Flat No', 'Flat', 'Flat Number', 'flat number');
+    if (!flat) continue;
+    const amenity = getCol(row, 'Paid for', 'Paid For', 'Paidfor', 'Subscription', 'Amenity')
+      .trim()
+      .toLowerCase();
     students.push({
-      id,
+      flat,
       name: getCol(row, 'Name'),
-      flat: getCol(row, 'Flat No', 'Flat', 'Flat Number', 'flat number'),
       month: getCol(row, 'Month'),
       status: getCol(row, 'Status'),
       type: getCol(row, 'Type'),
-      amenities,
+      amenity,
     });
   }
 
-  // Optionally pull the face photos ZIP from Drive and extract by ID.
+  // 2) Student roster (Student ID → Name/Flat) — for ID-based student lookup.
+  const rosterRows = await fetchCsvByGid(ROSTER_GID);
+  let roster: RosterEntry[] = [];
+  for (const row of rosterRows) {
+    const id = getCol(row, 'ID', 'Id', 'Student ID', 'StudentID');
+    if (!id) continue;
+    roster.push({
+      id,
+      name: getCol(row, 'Name'),
+      flat: getCol(row, 'Flat', 'Flat No', 'Flat Number', 'flat number'),
+      validTill: getCol(row, 'ValidTill', 'Valid Till', 'Valid To'),
+    });
+  }
+
+  // Optionally pull the face photos ZIP from Drive and extract by student ID.
   // Photos are best-effort: a ZIP failure must not abort the data sync.
   if (includePhotos) {
     try {
       const zipBase64 = await fetchFacesZipBase64();
-      await importPhotosFromBase64(zipBase64, students.map((s) => s.id));
+      await importPhotosFromBase64(zipBase64, roster.map((r) => r.id));
     } catch (e) {
       console.warn('Face photo sync failed (continuing without photos):', e);
     }
   }
 
-  // Re-attach any locally-available photos (cheap, no network) regardless,
-  // so a data-only sync keeps photos fetched in a previous full sync.
+  // Re-attach any locally-available photos (cheap, no network) regardless, so a
+  // data-only sync keeps photos fetched in a previous full sync. Named by ID.
   try {
-    students = await attachLocalPhotosById(students);
+    roster = await attachLocalPhotos(roster, (r) => r.id);
   } catch {
     /* ignore */
   }
 
   await saveLocalStudents(students);
+  await saveRoster(roster);
   await setLastSyncTime(new Date().toISOString());
   return students.length;
 }

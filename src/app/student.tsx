@@ -21,7 +21,14 @@ import DecisionOverlay from '@/components/decision-overlay';
 import { setPendingConfirmation } from '@/services/confirmation';
 import { enqueueLog } from '@/services/log-queue';
 import { decideEntry, type DecisionResult } from '@/services/subscription';
-import { addCheckedIn, checkedInKey, getStudentByIdOrFlat, type Student } from '@/services/storage';
+import {
+  addCheckedIn,
+  checkedInKey,
+  getDeployedAmenity,
+  getRosterById,
+  hasStudentSubscription,
+  type RosterEntry,
+} from '@/services/storage';
 
 function normalizeScannedCode(rawCode: string): string {
   return String(rawCode || '')
@@ -34,10 +41,11 @@ export default function StudentScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
-  const [student, setStudent] = useState<Student | null>(null);
+  const [student, setStudent] = useState<RosterEntry | null>(null);
   const [scannedId, setScannedId] = useState('');
   const [showResult, setShowResult] = useState(false);
   const [notFound, setNotFound] = useState(false);
+  const [hasSub, setHasSub] = useState(false);
   const [manualId, setManualId] = useState('');
   const [wedgeInput, setWedgeInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -72,10 +80,16 @@ export default function StudentScreen() {
   };
 
   const lookup = async (id: string) => {
-    const found = await getStudentByIdOrFlat(id);
+    const found = await getRosterById(id);
     setScannedId(id);
     setStudent(found);
     setNotFound(!found);
+    if (found) {
+      const amenity = await getDeployedAmenity();
+      setHasSub(await hasStudentSubscription(found.flat, found.name, amenity));
+    } else {
+      setHasSub(false);
+    }
     setShowResult(true);
   };
 
@@ -140,21 +154,24 @@ export default function StudentScreen() {
     setStudent(null);
     setScannedId('');
     setNotFound(false);
+    setHasSub(false);
   };
 
   const handleCheckIn = async () => {
     if (submitting) return;
     setSubmitting(true);
     try {
-      const id = student?.id || scannedId;
-      const result = await decideEntry({ category: 'Student', studentId: id });
+      const id = scannedId;
+      const flat = student?.flat || '';
+      const name = student?.name || '';
+      const result = await decideEntry({ category: 'Student', flat, name });
 
       if (result.allowed) {
         await addCheckedIn({
           key: checkedInKey('Student', { studentId: id }),
           category: 'Student',
-          flat: student?.flat || '',
-          name: student?.name || '',
+          flat,
+          name,
           gender: '',
           student_id: id,
           checkInAt: new Date().toISOString(),
@@ -164,8 +181,8 @@ export default function StudentScreen() {
 
       await enqueueLog({
         category: 'Student',
-        flat: student?.flat || '',
-        name: student?.name || '',
+        flat,
+        name,
         gender: '',
         student_id: id,
         direction: 'IN',
@@ -210,7 +227,7 @@ export default function StudentScreen() {
                 <Text style={styles.facePhotoInitial}>?</Text>
               </View>
               <Text style={styles.resultName}>ID: {scannedId}</Text>
-              <Text style={styles.notFoundSub}>Not found in subscriptions.</Text>
+              <Text style={styles.notFoundSub}>Not found in the student roster.</Text>
             </>
           ) : student ? (
             <>
@@ -222,11 +239,9 @@ export default function StudentScreen() {
                 </View>
               )}
               <Text style={styles.resultName}>{student.name || '—'}</Text>
-              {student.type ? (
-                <View style={styles.typeBadge}>
-                  <Text style={styles.typeBadgeText}>{student.type.toUpperCase()}</Text>
-                </View>
-              ) : null}
+              <View style={styles.typeBadge}>
+                <Text style={styles.typeBadgeText}>STUDENT</Text>
+              </View>
               <View style={styles.infoBar}>
                 <View style={styles.infoItem}>
                   <Text style={styles.infoLabel}>ID</Text>
@@ -239,17 +254,23 @@ export default function StudentScreen() {
                 </View>
                 <View style={styles.infoSep} />
                 <View style={styles.infoItem}>
-                  <Text style={styles.infoLabel}>MONTH</Text>
-                  <Text style={styles.infoValue}>{student.month || '—'}</Text>
+                  <Text style={styles.infoLabel}>VALID TILL</Text>
+                  <Text style={styles.infoValue}>{student.validTill || '—'}</Text>
                 </View>
               </View>
             </>
           ) : null}
         </View>
 
-        <TouchableOpacity style={styles.checkInBtn} onPress={handleCheckIn} disabled={submitting}>
-          {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.checkInText}>CHECK IN</Text>}
-        </TouchableOpacity>
+        {student && hasSub ? (
+          <TouchableOpacity style={styles.checkInBtn} onPress={handleCheckIn} disabled={submitting}>
+            {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.checkInText}>CHECK IN</Text>}
+          </TouchableOpacity>
+        ) : student ? (
+          <View style={styles.noSubBox}>
+            <Text style={styles.noSubText}>NO SUBSCRIPTION YET</Text>
+          </View>
+        ) : null}
         <TouchableOpacity style={styles.cancelBtn} onPress={resetScan}>
           <Text style={styles.cancelText}>CANCEL / SCAN AGAIN</Text>
         </TouchableOpacity>
@@ -333,7 +354,7 @@ export default function StudentScreen() {
         )}
 
         <View style={styles.manualSection}>
-          <Text style={styles.manualLabel}>ENTER STUDENT ID OR FLAT</Text>
+          <Text style={styles.manualLabel}>ENTER STUDENT ID</Text>
           <View style={styles.manualRow}>
             <TextInput
               ref={manualInputRef}
@@ -342,7 +363,7 @@ export default function StudentScreen() {
               onChangeText={setManualId}
               onFocus={() => setManualFocused(true)}
               onBlur={() => setManualFocused(false)}
-              placeholder="Scan or type ID / flat"
+              placeholder="Scan or type student ID"
               placeholderTextColor="#94A3B8"
               keyboardType="number-pad"
               autoCorrect={false}
@@ -433,6 +454,8 @@ const styles = StyleSheet.create({
   infoSep: { width: 1, backgroundColor: '#334155' },
   checkInBtn: { height: 100, backgroundColor: '#00A844', justifyContent: 'center', alignItems: 'center' },
   checkInText: { color: '#FFFFFF', fontSize: 30, fontWeight: '900', letterSpacing: 2 },
+  noSubBox: { height: 100, backgroundColor: '#FEF3C7', justifyContent: 'center', alignItems: 'center' },
+  noSubText: { color: '#B45309', fontSize: 24, fontWeight: '900', letterSpacing: 2 },
   cancelBtn: { height: 56, justifyContent: 'center', alignItems: 'center' },
   cancelText: { color: '#64748B', fontSize: 14, fontWeight: '800', letterSpacing: 1 },
 });

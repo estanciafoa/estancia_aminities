@@ -2,6 +2,7 @@ import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { AppState, useColorScheme } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { flushLogs } from '@/services/log-queue';
 
@@ -25,19 +26,21 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="index" />
-        <Stack.Screen name="admin" />
-        <Stack.Screen name="inside" />
-        <Stack.Screen name="checkin" />
-        <Stack.Screen name="checkout" />
-        <Stack.Screen name="family" />
-        <Stack.Screen name="student" />
-        <Stack.Screen name="guest" />
-        <Stack.Screen name="export" />
-      </Stack>
-      <StatusBar style="light" />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="index" />
+          <Stack.Screen name="admin" />
+          <Stack.Screen name="inside" />
+          <Stack.Screen name="checkin" />
+          <Stack.Screen name="checkout" />
+          <Stack.Screen name="family" />
+          <Stack.Screen name="student" />
+          <Stack.Screen name="guest" />
+          <Stack.Screen name="export" />
+        </Stack>
+        <StatusBar style="light" />
+      </ThemeProvider>
+    </GestureHandlerRootView>
   );
 }
