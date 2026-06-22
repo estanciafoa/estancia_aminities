@@ -167,6 +167,9 @@ export default function AdminScreen() {
         <TouchableOpacity style={[styles.actBtn, styles.actDark]} onPress={() => router.push('/export')}>
           <Text style={styles.actDarkText}>📄  EXPORT REPORT (PDF)</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={[styles.actBtn, styles.actDark, styles.actSpaced]} onPress={() => router.push('/defaulters')}>
+          <Text style={styles.actDarkText}>⚠️  DEFAULTERS (UNPAID)</Text>
+        </TouchableOpacity>
 
         <Text style={styles.section}>SECURITY</Text>
         <TouchableOpacity style={[styles.actBtn, styles.actOutline]} onPress={() => setPwModal(true)}>
@@ -248,6 +251,7 @@ const styles = StyleSheet.create({
   actFilled: { backgroundColor: '#0055FF' },
   actFilledText: { color: '#FFFFFF', fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
   actDark: { backgroundColor: '#0F172A' },
+  actSpaced: { marginTop: 12 },
   actDarkText: { color: '#FFFFFF', fontWeight: '900', fontSize: 15, letterSpacing: 1 },
   syncMessage: { fontSize: 12, fontWeight: '700', color: '#475569', marginTop: 10 },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 32 },

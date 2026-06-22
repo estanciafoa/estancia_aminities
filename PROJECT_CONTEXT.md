@@ -28,8 +28,13 @@ gradle release APK (debug-keystore signed).
 ### Home (`src/app/index.tsx`)
 - ⚙ admin icon (top-left → `/admin`), 👥 inside icon (top-right → `/inside`)
 - "GATING: <amenity>" bar with a "👥 N INSIDE" pill (tap → `/inside`)
+- **Dashboard strip**: Today's Entries / Inside Now / Unsynced cards + "Last sync: Xago" line (today's counts from local `getTodayStats`, bumped in `enqueueLog`; last sync from `getLastSyncTime`; unsynced from `getPendingCount`)
 - Big **IN** / **OUT** buttons
 - Randomized inspirational confirmation Modal shown after a check-in/out (one-shot handoff)
+
+### Ops features
+- **Auto-checkout** (`src/services/auto-checkout.ts`, run from `_layout.tsx` on mount/15s/active): closes "inside" sessions from a previous day or older than `getAutoCheckoutHours()` (default 4) — logged as `OUT` with status `AUTO`, removed from the registry.
+- **Defaulters report** (`src/app/defaulters.tsx`, Admin → DEFAULTERS): reads the attendance log, lists this month's unpaid IN attempts (WARN/REGISTER/DENIED) grouped by flat+name with attempt count + last status.
 
 ### Check IN
 `/checkin` (Family / Student / Guest chooser) →

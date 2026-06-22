@@ -4,12 +4,28 @@ import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { consumePendingConfirmation, type ConfirmKind } from '@/services/confirmation';
-import { getCheckedIn, getDeployedAmenity } from '@/services/storage';
+import { getPendingCount } from '@/services/log-queue';
+import { getCheckedIn, getDeployedAmenity, getLastSyncTime, getTodayStats } from '@/services/storage';
+
+function fmtAgo(iso: string | null): string {
+  if (!iso) return 'never';
+  const then = new Date(iso).getTime();
+  if (!isFinite(then)) return 'never';
+  const mins = Math.floor((Date.now() - then) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
 
 export default function HomeScreen() {
   const router = useRouter();
   const [amenity, setAmenity] = useState('');
   const [insideCount, setInsideCount] = useState(0);
+  const [todayIn, setTodayIn] = useState(0);
+  const [lastSync, setLastSync] = useState<string | null>(null);
+  const [pending, setPending] = useState(0);
   const [confirm, setConfirm] = useState<{ kind: ConfirmKind; message: string } | null>(null);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -17,6 +33,9 @@ export default function HomeScreen() {
     useCallback(() => {
       getDeployedAmenity().then(setAmenity);
       getCheckedIn().then((list) => setInsideCount(list.length));
+      getTodayStats().then((s) => setTodayIn(s.in));
+      getLastSyncTime().then(setLastSync);
+      getPendingCount().then(setPending);
       const pending = consumePendingConfirmation();
       if (pending) {
         setConfirm(pending);
@@ -35,7 +54,7 @@ export default function HomeScreen() {
         <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/admin')} hitSlop={12}>
           <Text style={styles.iconText}>⚙︎</Text>
         </TouchableOpacity>
-        <Text style={styles.titleText}>ESTANCIA AMENITIES</Text>
+        <Text style={styles.titleText}>ESTANCIA ACCESS</Text>
         <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/inside')} hitSlop={12}>
           <Text style={styles.iconText}>👥</Text>
         </TouchableOpacity>
@@ -53,6 +72,25 @@ export default function HomeScreen() {
           <Text style={styles.insidePillText}>👥 {insideCount} INSIDE</Text>
         </View>
       </TouchableOpacity>
+
+      <View style={styles.statsRow}>
+        <View style={styles.statCard}>
+          <Text style={styles.statNum}>{todayIn}</Text>
+          <Text style={styles.statLabel}>TODAY'S ENTRIES</Text>
+        </View>
+        <TouchableOpacity style={styles.statCard} activeOpacity={0.7} onPress={() => router.push('/inside')}>
+          <Text style={styles.statNum}>{insideCount}</Text>
+          <Text style={styles.statLabel}>INSIDE NOW</Text>
+        </TouchableOpacity>
+        <View style={styles.statCard}>
+          <Text style={[styles.statNum, pending > 0 && styles.statNumWarn]}>{pending}</Text>
+          <Text style={styles.statLabel}>UNSYNCED</Text>
+        </View>
+      </View>
+      <Text style={styles.syncLine}>
+        Last sync: {fmtAgo(lastSync)}
+        {pending > 0 ? '  ·  syncing…' : ''}
+      </Text>
 
       <View style={styles.menu}>
         <TouchableOpacity
@@ -112,6 +150,20 @@ const styles = StyleSheet.create({
   amenityWarn: { fontSize: 12, fontWeight: '900', color: '#D97706', letterSpacing: 0.5 },
   insidePill: { backgroundColor: '#208AEF', paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14 },
   insidePillText: { color: '#FFFFFF', fontSize: 12, fontWeight: '900', letterSpacing: 0.5 },
+  statsRow: { flexDirection: 'row', paddingHorizontal: 16, paddingTop: 14, gap: 10 },
+  statCard: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  statNum: { fontSize: 30, fontWeight: '900', color: '#0F172A' },
+  statNumWarn: { color: '#D97706' },
+  statLabel: { fontSize: 10, fontWeight: '800', color: '#64748B', letterSpacing: 1, marginTop: 2 },
+  syncLine: { fontSize: 11, fontWeight: '700', color: '#94A3B8', textAlign: 'center', marginTop: 8 },
   menu: { flex: 1, justifyContent: 'center', padding: 24, gap: 24 },
   bigButton: { flex: 1, borderRadius: 20, justifyContent: 'center', alignItems: 'center', elevation: 4 },
   inButton: { backgroundColor: '#00A844' },

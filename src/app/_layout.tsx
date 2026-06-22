@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { AppState, useColorScheme } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
+import { autoCheckoutStale } from '@/services/auto-checkout';
 import { flushLogs } from '@/services/log-queue';
 
 export default function RootLayout() {
@@ -12,12 +13,14 @@ export default function RootLayout() {
   // Background sync: flush any queued attendance logs on launch, periodically,
   // and whenever the app returns to the foreground.
   useEffect(() => {
-    flushLogs();
-    const interval = setInterval(() => {
+    const tick = () => {
+      autoCheckoutStale();
       flushLogs();
-    }, 15000);
+    };
+    tick();
+    const interval = setInterval(tick, 15000);
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') flushLogs();
+      if (state === 'active') tick();
     });
     return () => {
       clearInterval(interval);
@@ -37,6 +40,7 @@ export default function RootLayout() {
           <Stack.Screen name="family" />
           <Stack.Screen name="student" />
           <Stack.Screen name="guest" />
+          <Stack.Screen name="defaulters" />
           <Stack.Screen name="export" />
         </Stack>
         <StatusBar style="light" />

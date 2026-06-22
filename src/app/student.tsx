@@ -327,7 +327,7 @@ export default function StudentScreen() {
           <View style={styles.cameraContainer}>
             <CameraView
               style={styles.camera}
-              facing="back"
+              facing="front"
               barcodeScannerSettings={{ barcodeTypes: ['qr', 'code128', 'code39', 'ean13', 'ean8'] }}
               onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
             />

@@ -275,6 +275,64 @@ export async function setAdminPasscode(code: string): Promise<void> {
   await AsyncStorage.setItem(ADMIN_PASSCODE_KEY, code);
 }
 
+// ---- Auto-checkout policy (close stale "inside" sessions) ----
+
+const AUTO_CHECKOUT_HOURS_KEY = '@estancia_amenities_auto_checkout_hours';
+const DEFAULT_AUTO_CHECKOUT_HOURS = 4;
+
+/** Max hours a person may stay 'inside' before being auto-checked-out. */
+export async function getAutoCheckoutHours(): Promise<number> {
+  const v = await AsyncStorage.getItem(AUTO_CHECKOUT_HOURS_KEY);
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_AUTO_CHECKOUT_HOURS;
+}
+
+export async function setAutoCheckoutHours(hours: number): Promise<void> {
+  await AsyncStorage.setItem(AUTO_CHECKOUT_HOURS_KEY, String(hours));
+}
+
+// ---- Daily stats (local, offline) — powers the home dashboard ----
+
+const DAILY_STATS_KEY = '@estancia_amenities_daily_stats';
+
+export interface DayStat {
+  in: number;
+  out: number;
+}
+
+/** Local date key YYYY-MM-DD (device timezone). */
+export function todayKey(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+type DailyStats = Record<string, DayStat>;
+
+/** Increment today's IN/OUT counter (called from the log queue on every event). */
+export async function bumpDailyStat(direction: 'IN' | 'OUT'): Promise<void> {
+  const raw = await AsyncStorage.getItem(DAILY_STATS_KEY);
+  const stats: DailyStats = raw ? JSON.parse(raw) : {};
+  const key = todayKey();
+  const day = stats[key] || { in: 0, out: 0 };
+  if (direction === 'IN') day.in += 1;
+  else day.out += 1;
+  stats[key] = day;
+  // Keep the store small: drop entries older than ~60 days.
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 60);
+  for (const k of Object.keys(stats)) {
+    if (new Date(k) < cutoff) delete stats[k];
+  }
+  await AsyncStorage.setItem(DAILY_STATS_KEY, JSON.stringify(stats));
+}
+
+export async function getTodayStats(): Promise<DayStat> {
+  const raw = await AsyncStorage.getItem(DAILY_STATS_KEY);
+  const stats: DailyStats = raw ? JSON.parse(raw) : {};
+  return stats[todayKey()] || { in: 0, out: 0 };
+}
+
 // ---- Family autofill history (remembered only for Family entries) ----
 
 const FAMILY_HISTORY_KEY = '@estancia_amenities_family_history';

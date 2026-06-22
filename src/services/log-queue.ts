@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { postAttendanceLog, type AttendanceLogRow } from './sheets';
-import { getDeployedAmenity } from './storage';
+import { bumpDailyStat, getDeployedAmenity } from './storage';
 
 const QUEUE_KEY = '@estancia_amenities_log_queue';
 
@@ -36,6 +36,8 @@ export async function enqueueLog(row: AttendanceLogRow): Promise<void> {
     timestamp: new Date().toISOString(),
   });
   await writeQueue(queue);
+  // Update the local daily counter that powers the home dashboard.
+  if (row.direction === 'IN' || row.direction === 'OUT') void bumpDailyStat(row.direction);
   // Fire-and-forget; never blocks the UI.
   void flushLogs();
 }
