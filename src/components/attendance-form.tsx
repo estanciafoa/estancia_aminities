@@ -21,7 +21,7 @@ import { decideEntry, type DecisionResult } from '@/services/subscription';
 import {
   addCheckedIn,
   checkedInKey,
-  getFamilyMembers,
+  getFamilySuggestions,
   rememberFamilyMember,
   type Category,
   type FamilyMember,
@@ -32,32 +32,50 @@ interface Props {
   enableHistory: boolean; // Family remembers; Guest does not
 }
 
+const FLAT_LENGTH = 4;
+type Step = 'flat' | 'people' | 'person';
+
 export default function AttendanceForm({ category, enableHistory }: Props) {
   const router = useRouter();
+  const [step, setStep] = useState<Step>('flat');
   const [flat, setFlat] = useState('');
+  const [members, setMembers] = useState<FamilyMember[]>([]);
   const [name, setName] = useState('');
   const [gender, setGender] = useState<'M' | 'F' | ''>('');
-  const [suggestions, setSuggestions] = useState<FamilyMember[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [overlay, setOverlay] = useState<DecisionResult | null>(null);
-  const flatDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const advancing = useRef(false);
 
+  // Auto-advance once a full flat number has been keyed in.
   useEffect(() => {
-    if (!enableHistory) return;
-    if (flatDebounce.current) clearTimeout(flatDebounce.current);
-    flatDebounce.current = setTimeout(async () => {
-      const members = flat.trim() ? await getFamilyMembers(flat) : [];
-      setSuggestions(members);
-    }, 200);
-    return () => {
-      if (flatDebounce.current) clearTimeout(flatDebounce.current);
-    };
-  }, [flat, enableHistory]);
+    if (step !== 'flat' || flat.length !== FLAT_LENGTH) return;
+    void proceedFromFlat();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flat, step]);
 
-  const pickSuggestion = (m: FamilyMember) => {
-    setName(m.name);
-    setGender(m.gender === 'F' ? 'F' : 'M');
-    setSuggestions([]);
+  const proceedFromFlat = async () => {
+    if (advancing.current) return;
+    advancing.current = true;
+    try {
+      if (enableHistory) {
+        const ms = await getFamilySuggestions(flat);
+        setMembers(ms);
+        setStep('people');
+      } else {
+        resetPerson();
+        setStep('person');
+      }
+    } finally {
+      advancing.current = false;
+    }
+  };
+
+  const pressKey = (k: string) => {
+    if (k === '⌫') {
+      setFlat((f) => f.slice(0, -1));
+      return;
+    }
+    setFlat((f) => (f.length >= FLAT_LENGTH ? f : f + k));
   };
 
   const resetPerson = () => {
@@ -65,50 +83,11 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
     setGender('');
   };
 
-  const handleCheckIn = async () => {
-    if (submitting) return;
-    if (!flat.trim()) return Alert.alert('Missing flat', 'Enter the flat number.');
-    if (!name.trim()) return Alert.alert('Missing name', 'Enter the name.');
-    if (!gender) return Alert.alert('Missing gender', 'Select Male or Female.');
-
-    setSubmitting(true);
-    try {
-      const result = await decideEntry({ category, flat });
-
-      // Allowed entrants are recorded as currently inside (for Check-Out).
-      if (result.allowed) {
-        await addCheckedIn({
-          key: checkedInKey(category, { flat, name }),
-          category,
-          flat: flat.trim(),
-          name: name.trim(),
-          gender,
-          student_id: '',
-          checkInAt: new Date().toISOString(),
-        });
-        if (enableHistory) await rememberFamilyMember(flat, name, gender);
-        setPendingConfirmation('in');
-      }
-
-      // Every attempt is queued locally (instant) and synced in the background.
-      await enqueueLog({
-        category,
-        flat: flat.trim(),
-        name: name.trim(),
-        gender,
-        student_id: '',
-        direction: 'IN',
-        subscription: result.decision,
-      });
-
-      if (result.overlay) {
-        setOverlay(result);
-      } else {
-        goHome();
-      }
-    } finally {
-      setSubmitting(false);
-    }
+  const backToFlat = () => {
+    setStep('flat');
+    setFlat('');
+    setMembers([]);
+    resetPerson();
   };
 
   const goHome = () => {
@@ -124,80 +103,212 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
     goHome();
   };
 
+  const onBack = () => {
+    if (step === 'flat') router.back();
+    else if (step === 'person' && enableHistory) {
+      // Family: go back to the resident list, not all the way to the keypad.
+      resetPerson();
+      setStep('people');
+    } else backToFlat();
+  };
+
+  // Records an entry for a fully-resolved person (name + gender known).
+  const submit = async (pName: string, pGender: 'M' | 'F') => {
+    if (submitting) return;
+    Keyboard.dismiss();
+    setSubmitting(true);
+    try {
+      const result = await decideEntry({ category, flat });
+
+      if (result.allowed) {
+        await addCheckedIn({
+          key: checkedInKey(category, { flat, name: pName }),
+          category,
+          flat: flat.trim(),
+          name: pName.trim(),
+          gender: pGender,
+          student_id: '',
+          checkInAt: new Date().toISOString(),
+        });
+        if (enableHistory) await rememberFamilyMember(flat, pName, pGender);
+        setPendingConfirmation('in');
+      }
+
+      await enqueueLog({
+        category,
+        flat: flat.trim(),
+        name: pName.trim(),
+        gender: pGender,
+        student_id: '',
+        direction: 'IN',
+        subscription: result.decision,
+      });
+
+      if (result.overlay) setOverlay(result);
+      else goHome();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitNewPerson = () => {
+    if (!name.trim()) return Alert.alert('Missing name', 'Enter the name.');
+    if (!gender) return Alert.alert('Missing gender', 'Select Male or Female.');
+    void submit(name, gender);
+  };
+
+  const titleSuffix = step === 'flat' ? '' : `  ·  ${flat}`;
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.titleBar}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={12}>
+        <TouchableOpacity onPress={onBack} hitSlop={12}>
           <Text style={styles.backText}>‹ BACK</Text>
         </TouchableOpacity>
-        <Text style={styles.titleText}>{category.toUpperCase()} · IN</Text>
-        <View style={{ width: 56 }} />
+        <Text style={styles.titleText}>
+          {category.toUpperCase()} · IN{titleSuffix}
+        </Text>
+        <View style={{ width: 64 }} />
       </View>
 
-      <KeyboardAvoidingView style={styles.container} behavior="padding">
-        <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <Text style={styles.label}>FLAT NUMBER</Text>
-          <TextInput
-            style={styles.input}
-            value={flat}
-            onChangeText={setFlat}
-            placeholder="e.g. 1201"
-            placeholderTextColor="#94A3B8"
-            keyboardType="number-pad"
-            returnKeyType="done"
-            onBlur={() => Keyboard.dismiss()}
-          />
+      {step === 'flat' && (
+        <Numpad flat={flat} onKey={pressKey} disabled={submitting} />
+      )}
 
-          {enableHistory && suggestions.length > 0 && (
-            <View style={styles.suggestionBox}>
-              <Text style={styles.suggestionHint}>TAP TO AUTOFILL</Text>
-              {suggestions.map((m) => (
-                <TouchableOpacity key={m.name} style={styles.suggestionRow} onPress={() => pickSuggestion(m)}>
-                  <Text style={styles.suggestionName}>{m.name}</Text>
-                  <Text style={styles.suggestionGender}>{m.gender === 'F' ? 'FEMALE' : 'MALE'}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+      {step === 'people' && (
+        <ScrollView contentContainerStyle={styles.peopleBody}>
+          <Text style={styles.flatHeadline}>FLAT {flat}</Text>
+          {members.length > 0 ? (
+            <Text style={styles.peopleHint}>TAP A RESIDENT TO CHECK IN</Text>
+          ) : (
+            <Text style={styles.peopleHint}>NO SAVED RESIDENTS FOR THIS FLAT</Text>
           )}
 
-          <Text style={styles.label}>NAME</Text>
-          <TextInput
-            style={styles.input}
-            value={name}
-            onChangeText={setName}
-            placeholder="Full name"
-            placeholderTextColor="#94A3B8"
-            autoCapitalize="words"
-            returnKeyType="done"
-            blurOnSubmit
-            onSubmitEditing={() => Keyboard.dismiss()}
-            onBlur={() => Keyboard.dismiss()}
-          />
-
-          <Text style={styles.label}>GENDER</Text>
-          <View style={styles.genderRow}>
+          {members.map((m) => (
             <TouchableOpacity
-              style={[styles.genderBtn, gender === 'M' && styles.genderBtnActive]}
-              onPress={() => setGender('M')}>
-              <Text style={[styles.genderText, gender === 'M' && styles.genderTextActive]}>MALE</Text>
+              key={m.name}
+              style={styles.personRow}
+              activeOpacity={0.85}
+              disabled={submitting}
+              onPress={() => {
+                // Known gender → check in straight away; unknown → ask once.
+                if (m.gender === 'M' || m.gender === 'F') submit(m.name, m.gender);
+                else {
+                  setName(m.name);
+                  setGender('');
+                  setStep('person');
+                }
+              }}>
+              <Text style={styles.personName}>{m.name}</Text>
+              <Text style={styles.personGender}>
+                {m.gender === 'F' ? 'FEMALE' : m.gender === 'M' ? 'MALE' : 'SET GENDER ›'}
+              </Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.genderBtn, gender === 'F' && styles.genderBtnActive]}
-              onPress={() => setGender('F')}>
-              <Text style={[styles.genderText, gender === 'F' && styles.genderTextActive]}>FEMALE</Text>
+          ))}
+
+          <TouchableOpacity
+            style={styles.addNewBtn}
+            activeOpacity={0.85}
+            disabled={submitting}
+            onPress={() => {
+              resetPerson();
+              setStep('person');
+            }}>
+            <Text style={styles.addNewText}>+ ADD NEW PERSON</Text>
+          </TouchableOpacity>
+
+          {submitting && <ActivityIndicator size="large" color="#00A844" style={{ marginTop: 24 }} />}
+        </ScrollView>
+      )}
+
+      {step === 'person' && (
+        <KeyboardAvoidingView style={styles.container} behavior="padding">
+          <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+            <Text style={styles.flatHeadline}>FLAT {flat}</Text>
+
+            <Text style={styles.label}>NAME</Text>
+            <TextInput
+              style={styles.input}
+              value={name}
+              onChangeText={setName}
+              placeholder="Full name"
+              placeholderTextColor="#94A3B8"
+              autoCapitalize="words"
+              autoFocus
+              returnKeyType="done"
+              blurOnSubmit
+              onSubmitEditing={() => Keyboard.dismiss()}
+            />
+
+            <Text style={styles.label}>GENDER</Text>
+            <View style={styles.genderRow}>
+              <TouchableOpacity
+                style={[styles.genderBtn, gender === 'M' && styles.genderBtnActive]}
+                onPress={() => setGender('M')}>
+                <Text style={[styles.genderText, gender === 'M' && styles.genderTextActive]}>MALE</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.genderBtn, gender === 'F' && styles.genderBtnActive]}
+                onPress={() => setGender('F')}>
+                <Text style={[styles.genderText, gender === 'F' && styles.genderTextActive]}>FEMALE</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+          <View style={styles.footer}>
+            <TouchableOpacity style={styles.checkInBtn} onPress={submitNewPerson} disabled={submitting}>
+              {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.checkInText}>CHECK IN</Text>}
             </TouchableOpacity>
           </View>
-
-        </ScrollView>
-        <View style={styles.footer}>
-          <TouchableOpacity style={styles.checkInBtn} onPress={handleCheckIn} disabled={submitting}>
-            {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.checkInText}>CHECK IN</Text>}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
+        </KeyboardAvoidingView>
+      )}
 
       <DecisionOverlay result={overlay} onDismiss={dismissOverlay} />
     </SafeAreaView>
+  );
+}
+
+// --- Full-screen number board ------------------------------------------------
+
+const ROWS = [
+  ['1', '2', '3'],
+  ['4', '5', '6'],
+  ['7', '8', '9'],
+  ['', '0', '⌫'],
+];
+
+function Numpad({ flat, onKey, disabled }: { flat: string; onKey: (k: string) => void; disabled: boolean }) {
+  const slots = Array.from({ length: FLAT_LENGTH }, (_, i) => flat[i] ?? '');
+  return (
+    <View style={styles.numpad}>
+      <View style={styles.display}>
+        {slots.map((d, i) => (
+          <View key={i} style={[styles.slot, d ? styles.slotFilled : null]}>
+            <Text style={styles.slotText}>{d || '·'}</Text>
+          </View>
+        ))}
+      </View>
+
+      <View style={styles.keysGrid}>
+        {ROWS.map((row, r) => (
+          <View key={r} style={styles.keyRow}>
+            {row.map((k, c) =>
+              k === '' ? (
+                <View key={c} style={styles.keySpacer} />
+              ) : (
+                <TouchableOpacity
+                  key={c}
+                  style={styles.key}
+                  activeOpacity={0.6}
+                  disabled={disabled}
+                  onPress={() => onKey(k)}>
+                  <Text style={[styles.keyText, k === '⌫' && styles.keyTextMuted]}>{k}</Text>
+                </TouchableOpacity>
+              ),
+            )}
+          </View>
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -211,45 +322,111 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  backText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', width: 56 },
+  backText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', width: 64 },
   titleText: { fontSize: 20, fontWeight: '900', color: '#FFFFFF', letterSpacing: 1 },
-  body: { padding: 24 },
-  label: { fontSize: 12, fontWeight: '800', color: '#64748B', letterSpacing: 2, marginTop: 18, marginBottom: 8 },
-  input: {
-    height: 56,
+
+  // Number board
+  numpad: { flex: 1, padding: 20 },
+  display: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 16,
+    paddingVertical: 24,
+    paddingHorizontal: 4,
+  },
+  slot: {
+    flex: 1,
+    maxWidth: 110,
+    height: 110,
+    borderRadius: 16,
+    borderWidth: 3,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#F8FAFC',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  slotFilled: { borderColor: '#00A844', backgroundColor: '#FFFFFF' },
+  slotText: { fontSize: 64, fontWeight: '900', color: '#0F172A' },
+  keysGrid: { flex: 1 },
+  keyRow: { flex: 1, flexDirection: 'row' },
+  key: {
+    flex: 1,
+    margin: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 18,
+    backgroundColor: '#F8FAFC',
+  },
+  keySpacer: { flex: 1, margin: 6 },
+  keyText: { fontSize: 76, fontWeight: '800', color: '#0F172A' },
+  keyTextMuted: { fontSize: 60, color: '#64748B' },
+
+  // People list (Family)
+  peopleBody: { padding: 24, paddingBottom: 48 },
+  flatHeadline: { fontSize: 34, fontWeight: '900', color: '#0F172A', letterSpacing: 2, textAlign: 'center' },
+  peopleHint: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 2,
+    textAlign: 'center',
+    marginTop: 8,
+    marginBottom: 20,
+  },
+  personRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    minHeight: 92,
+    paddingHorizontal: 24,
+    borderRadius: 16,
     borderWidth: 2,
     borderColor: '#E2E8F0',
-    paddingHorizontal: 16,
-    fontSize: 18,
+    backgroundColor: '#FFFFFF',
+    marginBottom: 14,
+  },
+  personName: { fontSize: 30, fontWeight: '800', color: '#0F172A', flex: 1 },
+  personGender: { fontSize: 15, fontWeight: '900', color: '#64748B', letterSpacing: 1 },
+  addNewBtn: {
+    minHeight: 92,
+    borderRadius: 16,
+    borderWidth: 3,
+    borderColor: '#208AEF',
+    borderStyle: 'dashed',
+    backgroundColor: '#EFF6FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  addNewText: { fontSize: 26, fontWeight: '900', color: '#208AEF', letterSpacing: 1 },
+
+  // Add-person form
+  body: { padding: 24 },
+  label: { fontSize: 12, fontWeight: '800', color: '#64748B', letterSpacing: 2, marginTop: 24, marginBottom: 8 },
+  input: {
+    height: 72,
+    borderWidth: 2,
+    borderColor: '#E2E8F0',
+    borderRadius: 12,
+    paddingHorizontal: 18,
+    fontSize: 26,
     fontWeight: '700',
     color: '#0F172A',
     backgroundColor: '#FFFFFF',
   },
-  suggestionBox: { marginTop: 8, borderWidth: 1, borderColor: '#CBD5E1', backgroundColor: '#F8FAFC' },
-  suggestionHint: { fontSize: 10, fontWeight: '800', color: '#94A3B8', letterSpacing: 1, padding: 8 },
-  suggestionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#E2E8F0',
-  },
-  suggestionName: { fontSize: 16, fontWeight: '700', color: '#0F172A' },
-  suggestionGender: { fontSize: 11, fontWeight: '800', color: '#64748B', letterSpacing: 1 },
-  genderRow: { flexDirection: 'row', gap: 12 },
+  genderRow: { flexDirection: 'row', gap: 14 },
   genderBtn: {
     flex: 1,
-    height: 56,
+    height: 84,
     borderWidth: 2,
     borderColor: '#E2E8F0',
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: '#FFFFFF',
   },
   genderBtnActive: { borderColor: '#208AEF', backgroundColor: '#EFF6FF' },
-  genderText: { fontSize: 16, fontWeight: '900', color: '#64748B', letterSpacing: 1 },
+  genderText: { fontSize: 24, fontWeight: '900', color: '#64748B', letterSpacing: 1 },
   genderTextActive: { color: '#208AEF' },
   footer: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 16, backgroundColor: '#FFFFFF' },
   checkInBtn: {

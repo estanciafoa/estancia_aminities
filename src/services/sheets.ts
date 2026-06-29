@@ -1,5 +1,12 @@
 import { attachLocalPhotos, importPhotosFromBase64 } from './photos';
-import { saveLocalStudents, saveRoster, setLastSyncTime, type RosterEntry, type Student } from './storage';
+import {
+  saveFamilyRoster,
+  saveLocalStudents,
+  saveRoster,
+  setLastSyncTime,
+  type RosterEntry,
+  type Student,
+} from './storage';
 
 // Deployed Apps Script web app that proxies the (private) Google Sheet.
 // It exposes a `get_csv` action guarded by a token. See README for redeploy steps.
@@ -8,6 +15,9 @@ const APPS_SCRIPT_URL =
 const SHEET_TOKEN = 'Admin2026';
 const STUDENTS_GID = '716123554'; // subscription details tab (Flat No → Paid for)
 const ROSTER_GID = '0'; // "Student id" tab (Student ID → Name/Flat), photos by ID
+// Optional "Family Members" tab (columns: Flat, Name, Gender) — pre-seeds the
+// family autofill list. Leave '' until the tab exists; sync skips it when empty.
+const FAMILY_GID = '';
 
 // In/out attendance log lives in a separate spreadsheet, written via a
 // dedicated (write-only) Apps Script deployment. Reads stay on APPS_SCRIPT_URL.
@@ -222,6 +232,25 @@ export async function syncStudents(opts: { photos?: boolean } = {}): Promise<num
       flat: getCol(row, 'Flat', 'Flat No', 'Flat Number', 'flat number'),
       validTill: getCol(row, 'ValidTill', 'Valid Till', 'Valid To'),
     });
+  }
+
+  // 3) Optional Family Members tab (Flat, Name, Gender) — pre-seeds the family
+  //    autofill list. Best-effort: a missing tab/gid must not abort the sync.
+  if (FAMILY_GID) {
+    try {
+      const famRows = await fetchCsvByGid(FAMILY_GID);
+      const fam: { flat: string; name: string; gender: string }[] = [];
+      for (const row of famRows) {
+        const flat = getCol(row, 'Flat', 'Flat No', 'Flat Number', 'flat number');
+        const name = getCol(row, 'Name');
+        if (!flat || !name) continue;
+        const g = getCol(row, 'Gender', 'Sex').trim().toUpperCase();
+        fam.push({ flat, name, gender: g.startsWith('F') ? 'F' : g.startsWith('M') ? 'M' : '' });
+      }
+      await saveFamilyRoster(fam);
+    } catch (e) {
+      console.warn('Family roster sync failed (continuing):', e);
+    }
   }
 
   // Optionally pull the face photos ZIP from Drive and extract by student ID.

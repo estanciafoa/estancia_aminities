@@ -207,9 +207,10 @@ export async function setLastSyncTime(time: string): Promise<void> {
 }
 
 export async function clearLocalStudents(): Promise<void> {
-  await AsyncStorage.multiRemove([STUDENTS_KEY, ROSTER_KEY, LAST_SYNC_KEY]);
+  await AsyncStorage.multiRemove([STUDENTS_KEY, ROSTER_KEY, FAMILY_ROSTER_KEY, LAST_SYNC_KEY]);
   _cache = null;
   _roster = null;
+  _familyRoster = null;
 }
 
 // --- student roster (id → flat/name/photo) -----------------------------------
@@ -371,6 +372,74 @@ export async function rememberFamilyMember(
   else list.push({ name: trimmedName, gender });
   history[key] = list;
   await AsyncStorage.setItem(FAMILY_HISTORY_KEY, JSON.stringify(history));
+}
+
+// ---- Family roster (synced from an optional "Family Members" sheet tab) ----
+// Pre-seeds the per-flat family list (with gender) so a freshly-installed device
+// shows residents before anyone has checked in. Merged with the local history
+// and the subscription names in getFamilySuggestions().
+
+const FAMILY_ROSTER_KEY = '@estancia_amenities_family_roster';
+
+type FamilyRoster = Record<string, FamilyMember[]>; // keyed by lowercased flat
+let _familyRoster: FamilyRoster | null = null;
+
+async function getFamilyRoster(): Promise<FamilyRoster> {
+  if (_familyRoster) return _familyRoster;
+  const data = await AsyncStorage.getItem(FAMILY_ROSTER_KEY);
+  _familyRoster = data ? JSON.parse(data) : {};
+  return _familyRoster!;
+}
+
+/** Replace the synced family roster (called from syncStudents). */
+export async function saveFamilyRoster(
+  entries: { flat: string; name: string; gender: string }[],
+): Promise<void> {
+  const map: FamilyRoster = {};
+  for (const e of entries) {
+    const key = e.flat.trim().toLowerCase();
+    const name = e.name.trim();
+    if (!key || !name) continue;
+    const list = map[key] || (map[key] = []);
+    if (!list.some((m) => m.name.trim().toLowerCase() === name.toLowerCase())) {
+      list.push({ name, gender: e.gender === 'F' || e.gender === 'M' ? e.gender : '' });
+    }
+  }
+  await AsyncStorage.setItem(FAMILY_ROSTER_KEY, JSON.stringify(map));
+  _familyRoster = map;
+}
+
+/**
+ * Family members to offer for a flat, merged from three sources and de-duped by
+ * (normalized) name: the synced Family Members tab (has gender), the names on
+ * the synced subscription rows for the flat (no gender), and locally-remembered
+ * check-ins (has gender). Gender precedence: roster > history > subscription.
+ */
+export async function getFamilySuggestions(flat: string): Promise<FamilyMember[]> {
+  const key = flat.trim().toLowerCase();
+  if (!key) return [];
+  const [roster, history, students] = await Promise.all([
+    getFamilyRoster(),
+    getFamilyMembers(flat),
+    getLocalStudents(),
+  ]);
+
+  const byName = new Map<string, FamilyMember>();
+  const add = (name: string, gender: string) => {
+    const n = (name || '').trim();
+    if (!n) return;
+    const g = gender === 'F' || gender === 'M' ? gender : '';
+    const k = normalizeName(n);
+    if (!k) return;
+    const existing = byName.get(k);
+    if (!existing) byName.set(k, { name: n, gender: g });
+    else if (!existing.gender && g) existing.gender = g; // fill missing gender
+  };
+
+  for (const m of roster[key] || []) add(m.name, m.gender);
+  for (const m of history) add(m.name, m.gender);
+  for (const s of students) if (s.flat.trim().toLowerCase() === key) add(s.name, '');
+  return Array.from(byName.values());
 }
 
 // ---- Checked-in registry (device-local; powers the Check-Out flow) ----
