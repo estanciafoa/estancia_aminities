@@ -4,7 +4,7 @@ import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { consumePendingConfirmation, type ConfirmKind } from '@/services/confirmation';
-import { getPendingCount } from '@/services/log-queue';
+import { flushLogs, getPendingCount } from '@/services/log-queue';
 import { getCheckedIn, getDeployedAmenity, getLastSyncTime, getTodayStats } from '@/services/storage';
 
 function fmtAgo(iso: string | null): string {
@@ -36,14 +36,31 @@ export default function HomeScreen() {
       getTodayStats().then((s) => setTodayIn(s.in));
       getLastSyncTime().then(setLastSync);
       getPendingCount().then(setPending);
-      const pending = consumePendingConfirmation();
-      if (pending) {
-        setConfirm(pending);
+
+      // A background flush clears the queue a moment after a check-in, so a
+      // one-shot read leaves a stale "unsynced N". Nudge the flush and keep the
+      // count live while focused; stop once it drains.
+      let poll: ReturnType<typeof setInterval> | null = null;
+      void flushLogs();
+      poll = setInterval(async () => {
+        await flushLogs();
+        const n = await getPendingCount();
+        setPending(n);
+        if (n === 0 && poll) {
+          clearInterval(poll);
+          poll = null;
+        }
+      }, 2500);
+
+      const pendingConfirm = consumePendingConfirmation();
+      if (pendingConfirm) {
+        setConfirm(pendingConfirm);
         if (confirmTimer.current) clearTimeout(confirmTimer.current);
         confirmTimer.current = setTimeout(() => setConfirm(null), 4500);
       }
       return () => {
         if (confirmTimer.current) clearTimeout(confirmTimer.current);
+        if (poll) clearInterval(poll);
       };
     }, []),
   );

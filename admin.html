@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Estancia Amenities — Subscription Sheet Updater</title>
+  <!-- SheetJS (xlsx/xls parser). Real browser page, so a CDN is fine.
+       To run fully offline, download xlsx.full.min.js next to this file and
+       change the src below to "./xlsx.full.min.js". -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <style>
+    :root {
+      --ink: #0F172A;
+      --blue: #0055FF;
+      --blue-soft: #208AEF;
+      --line: #E2E8F0;
+      --muted: #64748B;
+      --bg: #F8FAFC;
+      --ok: #16A34A;
+      --err: #DC2626;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    header {
+      background: var(--ink);
+      color: #fff;
+      padding: 18px 24px;
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    header h1 { font-size: 18px; font-weight: 900; letter-spacing: 2px; margin: 0; }
+    header .sub { font-size: 12px; color: #94A3B8; font-weight: 700; letter-spacing: 1px; }
+    main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 80px; }
+
+    .config-warn {
+      background: #FEF3C7; border: 1px solid #FDE68A; color: #92400E;
+      border-radius: 10px; padding: 12px 16px; font-size: 13px; font-weight: 700;
+      margin-bottom: 20px;
+    }
+    .config-warn code { background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 4px; }
+
+    .dropzone {
+      border: 2px dashed #CBD5E1; border-radius: 14px; background: #fff;
+      padding: 32px 20px; text-align: center; cursor: pointer; transition: .15s;
+    }
+    .dropzone.drag { border-color: var(--blue); background: #EFF4FF; }
+    .dropzone p { margin: 6px 0; color: var(--muted); font-size: 14px; }
+    .dropzone strong { color: var(--ink); font-size: 16px; }
+    .dropzone input { display: none; }
+
+    .card {
+      background: #fff; border: 1px solid var(--line); border-radius: 14px;
+      margin-top: 20px; overflow: hidden;
+    }
+    .card-head {
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      padding: 14px 18px; border-bottom: 1px solid var(--line);
+    }
+    .card-head .fname { font-weight: 800; font-size: 15px; flex: 1 1 220px; word-break: break-all; }
+    .card-head .count { font-size: 12px; font-weight: 800; color: var(--muted); letter-spacing: .5px; }
+    .card-head .rm { border: none; background: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
+
+    .row-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    label.tab-lbl { font-size: 11px; font-weight: 800; color: var(--muted); letter-spacing: 1px; }
+    select.tab {
+      font-size: 14px; font-weight: 800; padding: 8px 12px; border-radius: 8px;
+      border: 2px solid var(--blue-soft); color: var(--ink); background: #fff; cursor: pointer;
+    }
+    .suggest { font-size: 11px; color: var(--muted); }
+
+    button.push {
+      background: var(--blue); color: #fff; border: none; border-radius: 8px;
+      font-weight: 900; font-size: 13px; letter-spacing: .5px; padding: 10px 18px; cursor: pointer;
+    }
+    button.push:disabled { opacity: .5; cursor: default; }
+    button.pushall {
+      background: var(--ink); color: #fff; border: none; border-radius: 8px;
+      font-weight: 900; font-size: 13px; letter-spacing: .5px; padding: 12px 22px; cursor: pointer;
+      margin-top: 20px;
+    }
+    button.pushall:disabled { opacity: .5; cursor: default; }
+
+    .msg { font-size: 12px; font-weight: 800; padding: 0 18px 12px; }
+    .msg.ok { color: var(--ok); }
+    .msg.err { color: var(--err); }
+    .msg.warn { color: #B45309; }
+
+    .preview { max-height: 300px; overflow: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    thead th {
+      position: sticky; top: 0; background: #F1F5F9; text-align: left;
+      padding: 8px 12px; font-size: 11px; letter-spacing: .5px; color: var(--muted);
+      border-bottom: 1px solid var(--line); white-space: nowrap;
+    }
+    tbody td { padding: 7px 12px; border-bottom: 1px solid #F1F5F9; }
+    tbody td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tbody tr:hover { background: #FafbfC; }
+    .parse-err { color: var(--err); font-weight: 800; padding: 16px 18px; font-size: 13px; }
+
+    #log {
+      margin-top: 28px; font-size: 12px; font-family: ui-monospace, Menlo, monospace;
+      color: var(--muted); white-space: pre-wrap; line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SUBSCRIPTION SHEET UPDATER</h1>
+    <span class="sub">Estancia Amenities · gym / swimming / tennis / combo</span>
+  </header>
+
+  <main>
+    <div id="configWarn" class="config-warn" style="display:none">
+      ⚠️ <code>ENDPOINT</code> is not set. Deploy <code>apps-script/subscription-writer.gs</code>
+      and paste its <code>/exec</code> URL into the top of this file to enable pushing.
+    </div>
+
+    <div id="dropzone" class="dropzone">
+      <strong>Drop bank statements here</strong>
+      <p>or click to choose files (.xlsx / .xls) — you can select several at once.</p>
+      <p style="font-size:12px">Per-amenity files (“Gym Paid Llist.xlsx”, “Tennis.xlsx”) <em>or</em> a single
+      <strong>combined</strong> statement — a mixed file auto-splits to gym / swimming / tennis / combo
+      by each row’s description.</p>
+      <input id="fileInput" type="file" accept=".xlsx,.xls" multiple />
+    </div>
+
+    <div id="cards"></div>
+
+    <button id="pushAll" class="pushall" style="display:none">PUSH ALL TO SHEET</button>
+
+    <div id="log"></div>
+  </main>
+
+  <script>
+    // ---- Config ------------------------------------------------------------
+    const SHEET_ID = '1OhbhJPxep0s5eQKmakgmSjJBIMDEzSN3iRXuGMaOCng';
+    const TOKEN    = 'Admin2026';
+    const ENDPOINT = 'https://script.google.com/macros/s/AKfycbxPbb2C9M4wOp5yuaUdUqq4M-0d8yoDG8-P3JyxKXwR5hQ_J4l61Z1GppvmmnOKsB53/exec';
+    const TABS = {
+      gym:      '2051574635',
+      swimming: '1433427596',
+      tennis:   '2028550937',
+      combo:    '1913121077',
+    };
+    const TARGET_HEADERS = ['S.No.', 'APT NO.', 'NAME OF CLIENT', 'AMENITY USER', 'Month', 'Amount', 'Payment Description'];
+    const MONTHS = { jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun', jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec' };
+
+    // ---- State -------------------------------------------------------------
+    let uid = 0;
+    const files = new Map(); // id -> { name, tab, rows, error }
+
+    const $cards = document.getElementById('cards');
+    const $log = document.getElementById('log');
+    const $pushAll = document.getElementById('pushAll');
+    if (!ENDPOINT) document.getElementById('configWarn').style.display = '';
+
+    function log(msg, cls) {
+      const stamp = new Date().toLocaleTimeString();
+      const line = document.createElement('div');
+      if (cls) line.style.color = cls === 'err' ? 'var(--err)' : cls === 'ok' ? 'var(--ok)' : '';
+      line.textContent = '[' + stamp + '] ' + msg;
+      $log.appendChild(line);
+    }
+
+    // ---- Parsing helpers ---------------------------------------------------
+    function norm(s) { return String(s == null ? '' : s).trim(); }
+
+    // Find the header row (the one containing "Flat No." or "Slno") within the
+    // first ~10 rows, tolerating the 2 leading title rows.
+    function findHeader(aoa) {
+      for (let i = 0; i < Math.min(aoa.length, 10); i++) {
+        const cells = (aoa[i] || []).map((c) => norm(c).toLowerCase());
+        if (cells.some((c) => c === 'flat no.' || c === 'flat no' || c === 'slno' || c === 'slno.')) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    // Build a header-name -> column-index map (lowercased, trimmed).
+    function headerMap(headerRow) {
+      const map = {};
+      (headerRow || []).forEach((h, idx) => {
+        const key = norm(h).toLowerCase();
+        if (key && !(key in map)) map[key] = idx;
+      });
+      return map;
+    }
+
+    function col(map, ...aliases) {
+      for (const a of aliases) {
+        const k = a.toLowerCase();
+        if (k in map) return map[k];
+      }
+      return -1;
+    }
+
+    function toAmount(v) {
+      if (v == null || v === '') return 0;
+      if (typeof v === 'number') return v;
+      const cleaned = String(v).replace(/[^0-9.\-]/g, '');
+      const n = parseFloat(cleaned);
+      return isNaN(n) ? 0 : n;
+    }
+
+    // Normalize a month word + year into "Jul 2026". Returns '' if not a month.
+    function normMonth(word, yr) {
+      const mon = MONTHS[String(word).slice(0, 3).toLowerCase()];
+      if (!mon) return '';
+      let y = String(yr).trim();
+      if (y.length === 2) y = '20' + y;
+      return mon + ' ' + y;
+    }
+
+    // Pull the billing month out of a Description. Handles both the prefix
+    // form ("Jul26 - Gym Fee …") and the suffix form ("… until the period of JUL 2026").
+    function extractMonth(desc) {
+      const d = String(desc || '');
+      let m = d.match(/until\s+the\s+period\s+of\s+([A-Za-z]{3,9})\s+(\d{4})/i);
+      if (m) return normMonth(m[1], m[2]);
+      m = d.match(/^\s*([A-Za-z]{3,9})\s*'?\s*(\d{2,4})\b/);
+      if (m && MONTHS[m[1].slice(0, 3).toLowerCase()]) return normMonth(m[1], m[2]);
+      m = d.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*'?\s*(\d{2,4})\b/i);
+      if (m) return normMonth(m[1], m[2]);
+      return '';
+    }
+
+    // Pull the amenity user's name out of a Description. Handles the colon form
+    // ("… Flat No. 1098 : Chaitanya Singh Negi") and the dash form
+    // ("… Apartment 4024 - Lauryn Abraham - until the period …").
+    function extractUser(desc) {
+      const d = String(desc || '').trim();
+      const ci = d.lastIndexOf(':');
+      if (ci > -1) {
+        const after = d.slice(ci + 1).trim();
+        if (after) return after;
+      }
+      let m = d.match(/Apartment\s+\d+\s*-\s*(.+?)\s*-\s*until\s+the\s+period/i);
+      if (m) return m[1].trim();
+      m = d.match(/Apartment\s+\d+\s*-\s*(.+?)\s*$/i);
+      if (m) return m[1].trim();
+      return '';
+    }
+
+    // Guess the tab from the row-0 title text.
+    function suggestTab(aoa) {
+      const title = (aoa[0] || []).map((c) => norm(c)).join(' ').toLowerCase();
+      if (/gym\s*(and|&|\+)\s*swim/.test(title)) return 'combo';
+      if (/tennis/.test(title)) return 'tennis';
+      if (/swim/.test(title)) return 'swimming';
+      if (/gym/.test(title)) return 'gym';
+      return 'gym';
+    }
+
+    // Classify ONE transaction to its amenity tab from its Description text, so
+    // a single combined statement can be fanned out to all four tabs. A row that
+    // names TWO OR MORE amenities is a combo (e.g. "Gym and Swimming …",
+    // "Combo pack of Swim & Tennis …") → the combo tab; the app reads the exact
+    // amenities back out of the description. The bare word "combo" is NOT keyed
+    // on (e.g. "Tennis Court … Combo Balance for Tennis" names only tennis →
+    // tennis). Returns '' when no amenity keyword is present (needs a manual pick).
+    function classifyAmenity(desc) {
+      const d = String(desc || '').toLowerCase();
+      const hits = [/gym/.test(d), /swim/.test(d), /tennis/.test(d)];
+      const count = hits.filter(Boolean).length;
+      if (count >= 2) return 'combo';
+      if (hits[2]) return 'tennis';
+      if (hits[1]) return 'swimming';
+      if (hits[0]) return 'gym';
+      return '';
+    }
+
+    // Per-amenity row tallies for a split file (plus `_unknown`).
+    function amenityCounts(f) {
+      const c = {};
+      (f.amenities || []).forEach((a) => {
+        if (a && TABS[a]) c[a] = (c[a] || 0) + 1;
+        else c._unknown = (c._unknown || 0) + 1;
+      });
+      return c;
+    }
+
+    function parseWorkbook(arrayBuffer) {
+      const wb = XLSX.read(arrayBuffer, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: '' });
+      const hIdx = findHeader(aoa);
+      if (hIdx === -1) throw new Error('Could not find a header row (no "Flat No." / "Slno" column).');
+
+      const map = headerMap(aoa[hIdx]);
+      const iSlno = col(map, 'slno', 'slno.', 's.no.', 'sno');
+      const iFlat = col(map, 'flat no.', 'flat no', 'flat number', 'flat', 'apt no.', 'apt no', 'usn');
+      const iName = col(map, 'name', 'name of client');
+      const iAmt  = col(map, 'amount', 'amt');
+      const iDesc = col(map, 'payment description', 'description', 'head', 'narration', 'particulars', 'remarks', 'details');
+      if (iFlat === -1 && iName === -1) throw new Error('Neither a Flat No. nor a Name column was found.');
+
+      // Number of trailing header columns (Amount, and any Txn Date/No between
+      // the description and Amount). When a description contains a comma, that
+      // cell splits into extra columns and pushes Amount to the right; since
+      // Amount is the last column we read it from the row's end and rebuild the
+      // description from everything between its start and the trailing columns.
+      const headerCells = (aoa[hIdx] || []).map(norm);
+      let headerLen = headerCells.length;
+      while (headerLen > 0 && headerCells[headerLen - 1] === '') headerLen--;
+      const amountIsLast = iAmt > -1 && iAmt === headerLen - 1;
+      const nTrailing = iDesc > -1 ? headerLen - 1 - iDesc : 0;
+
+      const rows = [];
+      const amenities = [];
+      let seq = 0;
+      for (let r = hIdx + 1; r < aoa.length; r++) {
+        const raw = aoa[r] || [];
+        const flat = iFlat > -1 ? norm(raw[iFlat]) : '';
+        const name = iName > -1 ? norm(raw[iName]) : '';
+        if (!flat && !name) continue; // skip empty/trailing rows
+        seq++;
+        const sno = iSlno > -1 && norm(raw[iSlno]) ? norm(raw[iSlno]) : seq;
+
+        // Trim trailing empty cells (SheetJS pads short rows to sheet width).
+        let end = raw.length;
+        while (end > 0 && norm(raw[end - 1]) === '') end--;
+
+        let desc, amount;
+        if (iDesc > -1 && amountIsLast && end > iDesc) {
+          // Rejoin a comma-split description; Amount is the last non-empty cell.
+          amount = toAmount(raw[end - 1]);
+          desc = raw.slice(iDesc, Math.max(iDesc + 1, end - nTrailing)).map(norm).filter(Boolean).join(', ');
+        } else {
+          desc = iDesc > -1 ? norm(raw[iDesc]) : '';
+          amount = iAmt > -1 ? toAmount(raw[iAmt]) : 0;
+        }
+        rows.push([sno, flat, name, extractUser(desc), extractMonth(desc), amount, desc]);
+        amenities.push(classifyAmenity(desc));
+      }
+      // A combined statement mixes amenities → default to split mode.
+      const multi = new Set(amenities.filter(Boolean)).size > 1;
+      return { rows, amenities, suggestion: suggestTab(aoa), multi };
+    }
+
+    // ---- Rendering ---------------------------------------------------------
+    function render() {
+      $cards.innerHTML = '';
+      let anyValid = false;
+      for (const [id, f] of files) {
+        const card = document.createElement('div');
+        card.className = 'card';
+
+        // Head
+        const head = document.createElement('div');
+        head.className = 'card-head';
+
+        const fname = document.createElement('div');
+        fname.className = 'fname';
+        fname.textContent = f.name;
+        head.appendChild(fname);
+
+        if (!f.error) {
+          const count = document.createElement('span');
+          count.className = 'count';
+          if (f.split) {
+            const c = amenityCounts(f);
+            const matched = f.rows.length - (c._unknown || 0);
+            count.textContent = matched + ' ROWS' + (c._unknown ? ' (' + c._unknown + ' skipped)' : '');
+          } else {
+            count.textContent = f.rows.length + ' ROWS';
+          }
+          head.appendChild(count);
+
+          const ctrls = document.createElement('div');
+          ctrls.className = 'row-controls';
+
+          // SPLIT-BY-AMENITY toggle — route each row to its own tab.
+          const splitLbl = document.createElement('label');
+          splitLbl.className = 'tab-lbl';
+          splitLbl.style.cursor = 'pointer';
+          splitLbl.style.display = 'flex';
+          splitLbl.style.alignItems = 'center';
+          splitLbl.style.gap = '5px';
+          const splitCb = document.createElement('input');
+          splitCb.type = 'checkbox';
+          splitCb.checked = !!f.split;
+          splitCb.addEventListener('change', () => { f.split = splitCb.checked; render(); });
+          splitLbl.appendChild(splitCb);
+          splitLbl.appendChild(document.createTextNode('SPLIT BY AMENITY'));
+          ctrls.appendChild(splitLbl);
+
+          if (f.split) {
+            // Show the per-tab breakdown instead of a single-tab picker.
+            const counts = amenityCounts(f);
+            const chip = document.createElement('span');
+            chip.className = 'suggest';
+            chip.textContent = Object.keys(TABS)
+              .map((t) => t.toUpperCase() + ' ' + (counts[t] || 0)).join('  ·  ')
+              + (counts._unknown ? '  ·  ⚠ UNKNOWN ' + counts._unknown : '');
+            ctrls.appendChild(chip);
+          } else {
+            const lbl = document.createElement('label');
+            lbl.className = 'tab-lbl';
+            lbl.textContent = 'TAB';
+            const sel = document.createElement('select');
+            sel.className = 'tab';
+            for (const t of Object.keys(TABS)) {
+              const opt = document.createElement('option');
+              opt.value = t;
+              opt.textContent = t.toUpperCase();
+              if (t === f.tab) opt.selected = true;
+              sel.appendChild(opt);
+            }
+            sel.addEventListener('change', () => { f.tab = sel.value; });
+            ctrls.appendChild(lbl);
+            ctrls.appendChild(sel);
+          }
+          head.appendChild(ctrls);
+
+          const push = document.createElement('button');
+          push.className = 'push';
+          push.textContent = 'PUSH';
+          push.disabled = !ENDPOINT;
+          push.addEventListener('click', () => pushFile(id, push));
+          head.appendChild(push);
+          anyValid = true;
+        }
+
+        const rm = document.createElement('button');
+        rm.className = 'rm';
+        rm.title = 'Remove';
+        rm.textContent = '×';
+        rm.addEventListener('click', () => { files.delete(id); render(); });
+        head.appendChild(rm);
+
+        card.appendChild(head);
+
+        // Body
+        if (f.error) {
+          const err = document.createElement('div');
+          err.className = 'parse-err';
+          err.textContent = '⚠️ ' + f.error;
+          card.appendChild(err);
+        } else {
+          if (f.suggestion && f.suggestion !== f.tab) {
+            /* suggestion already applied as default; nothing extra */
+          }
+          const prev = document.createElement('div');
+          prev.className = 'preview';
+          prev.appendChild(buildTable(f));
+          card.appendChild(prev);
+        }
+
+        $cards.appendChild(card);
+      }
+      $pushAll.style.display = anyValid && ENDPOINT ? '' : 'none';
+    }
+
+    function buildTable(f) {
+      const rows = f.rows;
+      const split = !!f.split;
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const htr = document.createElement('tr');
+      const headers = split ? ['Amenity', ...TARGET_HEADERS] : TARGET_HEADERS;
+      for (const h of headers) {
+        const th = document.createElement('th');
+        th.textContent = h;
+        htr.appendChild(th);
+      }
+      thead.appendChild(htr);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      // Split mode: only show rows that matched an amenity — "other" rows are
+      // dropped from the preview entirely (they're skipped on push anyway).
+      const display = [];
+      rows.forEach((row, idx) => {
+        if (split && !(f.amenities[idx] && TABS[f.amenities[idx]])) return;
+        display.push({ row, idx });
+      });
+      const shown = display.slice(0, 200);
+      shown.forEach(({ row, idx }) => {
+        const tr = document.createElement('tr');
+        // Split mode: leading per-row amenity picker (editable, to fix a mis-tag).
+        if (split) {
+          const td = document.createElement('td');
+          const sel = document.createElement('select');
+          sel.className = 'tab';
+          sel.style.fontSize = '12px';
+          sel.style.padding = '4px 8px';
+          for (const t of Object.keys(TABS)) sel.appendChild(new Option(t.toUpperCase(), t));
+          sel.value = f.amenities[idx] || '';
+          sel.addEventListener('change', () => { f.amenities[idx] = sel.value; render(); });
+          td.appendChild(sel);
+          tr.appendChild(td);
+        }
+        row.forEach((v, i) => {
+          const td = document.createElement('td');
+          if (i === 0 || i === 5) td.className = 'num';
+          td.textContent = v;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      if (display.length > shown.length) {
+        const caption = document.createElement('caption');
+        caption.style.cssText = 'caption-side:bottom;text-align:left;padding:8px 12px;color:var(--muted);font-size:11px';
+        caption.textContent = '… showing ' + shown.length + ' of ' + display.length + ' rows';
+        table.appendChild(caption);
+      }
+      return table;
+    }
+
+    // ---- File intake -------------------------------------------------------
+    async function addFile(file) {
+      const id = ++uid;
+      try {
+        const buf = await file.arrayBuffer();
+        const { rows, amenities, suggestion, multi } = parseWorkbook(buf);
+        files.set(id, { name: file.name, tab: suggestion, suggestion, rows, amenities, split: multi, error: null });
+        log('Parsed "' + file.name + '" → ' + rows.length + ' rows'
+          + (multi ? ' · multiple amenities → SPLIT mode on' : ' · suggested tab: ' + suggestion.toUpperCase()));
+      } catch (e) {
+        files.set(id, { name: file.name, error: e.message || String(e) });
+        log('Failed to parse "' + file.name + '": ' + (e.message || e), 'err');
+      }
+      render();
+    }
+
+    function handleFiles(list) {
+      for (const f of list) addFile(f);
+    }
+
+    // ---- Duplicate detection (key = APT NO + AMENITY USER + Month) ----------
+    // Identifies the same subscription (person + amenity + month) regardless of
+    // which statement it came from — the S.No. differs per statement, so it must
+    // NOT be part of the key or the same person re-appears from a second file.
+    // row = [S.No., APT NO., NAME OF CLIENT, AMENITY USER, Month, Amount, Desc]
+    function rowKey(row) {
+      return [
+        String(row[1] == null ? '' : row[1]).trim().toLowerCase(), // APT NO.
+        String(row[3] == null ? '' : row[3]).trim().toLowerCase(), // AMENITY USER
+        String(row[4] == null ? '' : row[4]).trim().toLowerCase(), // Month
+      ].join('|');
+    }
+
+    // Fetch the keys already present in a tab. Returns a Set, or null if the
+    // sheet couldn't be read (caller then pushes without the sheet-side check).
+    async function fetchExistingKeys(gid) {
+      const url = ENDPOINT + '?action=existing_keys'
+        + '&token=' + encodeURIComponent(TOKEN)
+        + '&ssId=' + encodeURIComponent(SHEET_ID)
+        + '&gid=' + encodeURIComponent(gid);
+      const res = await fetch(url, { redirect: 'follow' });
+      const data = JSON.parse(await res.text());
+      if (!data.ok) throw new Error(data.error || 'read failed');
+      return new Set((data.result.keys || []).map((k) => String(k).trim().toLowerCase()));
+    }
+
+    // Drop rows that duplicate each other (within the batch) or already exist in
+    // the target tab (key = S.No. + APT NO + Month). Returns only the rows that
+    // are safe to push; skipped duplicates are logged, never pushed or prompted.
+    async function dedupeRows(tab, rows) {
+      let existing = null;
+      try {
+        existing = await fetchExistingKeys(TABS[tab]);
+      } catch (e) {
+        log('⚠️ Could not read existing ' + tab.toUpperCase() + ' rows (' + (e.message || e) + ') — pushing without the sheet duplicate check.', 'warn');
+      }
+      const seen = new Set();
+      const keep = [];
+      let dupSheet = 0, dupBatch = 0;
+      for (const r of rows) {
+        const k = rowKey(r);
+        if (existing && existing.has(k)) { dupSheet++; continue; }
+        if (seen.has(k)) { dupBatch++; continue; }
+        seen.add(k);
+        keep.push(r);
+      }
+      if (dupSheet || dupBatch) {
+        log('Skipped ' + (dupSheet + dupBatch) + ' duplicate row(s) for ' + tab.toUpperCase()
+          + (dupSheet ? ' · ' + dupSheet + ' already in sheet' : '')
+          + (dupBatch ? ' · ' + dupBatch + ' repeated in file' : '') + '.', 'warn');
+      }
+      return keep;
+    }
+
+    // ---- Pushing -----------------------------------------------------------
+    // POST one batch of rows to one amenity tab. Returns true if it landed (or
+    // was sent with an unreadable reply — a CORS/redirect quirk, not a failure).
+    async function postRows(amenity, rows) {
+      try {
+        const res = await fetch(ENDPOINT, {
+          method: 'POST',
+          redirect: 'follow',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            action: 'insert_rows',
+            token: TOKEN,
+            ssId: SHEET_ID,
+            gid: TABS[amenity],
+            rows: rows,
+          }),
+        });
+        const text = await res.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch (_) { /* opaque */ }
+        if (data && data.ok) {
+          const n = (data.result && data.result.inserted) != null ? data.result.inserted : rows.length;
+          log('✓ Pushed ' + n + ' rows to ' + amenity.toUpperCase() + ' tab.', 'ok');
+          return true;
+        }
+        if (data && data.ok === false) throw new Error(data.error || 'server rejected');
+        // Couldn't read a clean JSON reply (CORS/redirect). Best-effort note.
+        log('Sent ' + rows.length + ' rows to ' + amenity.toUpperCase() + ' — response unreadable, verify the sheet.', 'warn');
+        return true;
+      } catch (e) {
+        log('✗ Push failed for ' + amenity.toUpperCase() + ': ' + (e.message || e), 'err');
+        return false;
+      }
+    }
+
+    // Route to the split or single-tab pusher.
+    function pushFile(id, btn) {
+      const f = files.get(id);
+      if (!f) return Promise.resolve();
+      return f.split ? pushSplit(id, btn) : pushOne(id, btn);
+    }
+
+    async function pushOne(id, btn) {
+      const f = files.get(id);
+      if (!f || f.error) return;
+      if (!ENDPOINT) { log('ENDPOINT not set — cannot push.', 'err'); return; }
+      if (btn) { btn.disabled = true; btn.textContent = 'CHECKING…'; }
+      const rows = await dedupeRows(f.tab, f.rows);
+      if (!rows.length) {
+        log('Nothing to push for "' + f.name + '" — all rows were duplicates.', 'warn');
+        files.delete(id); render();
+        return;
+      }
+      if (btn) btn.textContent = 'PUSHING…';
+      const ok = await postRows(f.tab, rows);
+      if (ok) { files.delete(id); render(); }
+      else if (btn) { btn.disabled = false; btn.textContent = 'RETRY PUSH'; }
+    }
+
+    // Split one combined statement into per-amenity batches and push each to its
+    // own tab (each batch still goes through the duplicate check).
+    async function pushSplit(id, btn) {
+      const f = files.get(id);
+      if (!f || f.error) return;
+      if (!ENDPOINT) { log('ENDPOINT not set — cannot push.', 'err'); return; }
+
+      const groups = {};
+      const unknown = [];
+      f.rows.forEach((r, i) => {
+        const a = f.amenities[i];
+        if (a && TABS[a]) (groups[a] = groups[a] || []).push(r);
+        else unknown.push(i + 1);
+      });
+
+      if (unknown.length) {
+        log('Skipping ' + unknown.length + ' non-amenity row(s) — no gym/swimming/tennis match.', 'warn');
+      }
+      const targets = Object.keys(groups);
+      if (!targets.length) { log('Nothing to push — no rows matched an amenity.', 'warn'); return; }
+
+      if (btn) { btn.disabled = true; btn.textContent = 'CHECKING…'; }
+      let allOk = true;
+      for (const amenity of targets) {
+        const rows = await dedupeRows(amenity, groups[amenity]);
+        if (!rows.length) {
+          log('No new rows for ' + amenity.toUpperCase() + ' — all duplicates.', 'warn');
+          continue;
+        }
+        if (btn) btn.textContent = 'PUSHING ' + amenity.toUpperCase() + '…';
+        const ok = await postRows(amenity, rows);
+        if (!ok) allOk = false;
+      }
+      // Clear the card once every matched batch pushed (unknown rows are
+      // intentionally skipped, so they don't hold the card open).
+      if (allOk) { files.delete(id); }
+      render();
+      if (files.has(id) && btn) { btn.disabled = false; btn.textContent = 'RETRY PUSH'; }
+    }
+
+    async function pushAll() {
+      $pushAll.disabled = true;
+      $pushAll.textContent = 'PUSHING ALL…';
+      // Snapshot: pushFile removes successful cards from `files` as it goes.
+      for (const [id, f] of Array.from(files)) {
+        if (!f.error) await pushFile(id, null);
+      }
+      $pushAll.disabled = false;
+      $pushAll.textContent = 'PUSH ALL TO SHEET';
+      render();
+    }
+
+    // ---- Wiring ------------------------------------------------------------
+    const $dz = document.getElementById('dropzone');
+    const $input = document.getElementById('fileInput');
+    $dz.addEventListener('click', () => $input.click());
+    $input.addEventListener('change', () => { handleFiles($input.files); $input.value = ''; });
+    ['dragenter', 'dragover'].forEach((ev) =>
+      $dz.addEventListener(ev, (e) => { e.preventDefault(); $dz.classList.add('drag'); }));
+    ['dragleave', 'drop'].forEach((ev) =>
+      $dz.addEventListener(ev, (e) => { e.preventDefault(); $dz.classList.remove('drag'); }));
+    $dz.addEventListener('drop', (e) => { if (e.dataTransfer) handleFiles(e.dataTransfer.files); });
+    $pushAll.addEventListener('click', pushAll);
+  </script>
+</body>
+</html>

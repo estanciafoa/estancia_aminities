@@ -44,6 +44,8 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
   const [gender, setGender] = useState<'M' | 'F' | ''>('');
   const [submitting, setSubmitting] = useState(false);
   const [overlay, setOverlay] = useState<DecisionResult | null>(null);
+  // The person the current overlay is about — passed to the Pay flow.
+  const [payPerson, setPayPerson] = useState<{ name: string; gender: string }>({ name: '', gender: '' });
   const advancing = useRef(false);
 
   // Auto-advance once a full flat number has been keyed in.
@@ -117,6 +119,7 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
     if (submitting) return;
     Keyboard.dismiss();
     setSubmitting(true);
+    setPayPerson({ name: pName, gender: pGender });
     try {
       const result = await decideEntry({ category, flat });
 
@@ -262,7 +265,18 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
         </KeyboardAvoidingView>
       )}
 
-      <DecisionOverlay result={overlay} onDismiss={dismissOverlay} />
+      <DecisionOverlay
+        result={overlay}
+        onDismiss={dismissOverlay}
+        onPayNow={() => {
+          setOverlay(null);
+          // '/pay' route types regenerate under `expo start`; cast until then.
+          router.push({
+            pathname: '/pay' as any,
+            params: { flat, name: payPerson.name, category, gender: payPerson.gender },
+          });
+        }}
+      />
     </SafeAreaView>
   );
 }

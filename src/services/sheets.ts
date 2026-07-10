@@ -1,5 +1,6 @@
 import { attachLocalPhotos, importPhotosFromBase64 } from './photos';
 import {
+  getLastSyncTime,
   saveFamilyRoster,
   saveLocalStudents,
   saveRoster,
@@ -13,11 +14,23 @@ import {
 const APPS_SCRIPT_URL =
   'https://script.google.com/macros/s/AKfycby2yjp7UEvBdYIDzKjOyFInegp_9CA7LVhpmbHbqwnxdPYEI5WJE8BYki-3Dwrgfm7pkw/exec';
 const SHEET_TOKEN = 'Admin2026';
-const STUDENTS_GID = '716123554'; // subscription details tab (Flat No → Paid for)
 const ROSTER_GID = '0'; // "Student id" tab (Student ID → Name/Flat), photos by ID
 // Optional "Family Members" tab (columns: Flat, Name, Gender) — pre-seeds the
 // family autofill list. Leave '' until the tab exists; sync skips it when empty.
 const FAMILY_GID = '';
+
+// Subscription source: the amenities-payment sheet populated by admin.html, read
+// via the subscription-writer Apps Script (`get_rows` action, ssId passed
+// explicitly). Each amenity has its own tab; a `combo` row covers gym + swimming.
+const SUB_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbxPbb2C9M4wOp5yuaUdUqq4M-0d8yoDG8-P3JyxKXwR5hQ_J4l61Z1GppvmmnOKsB53/exec';
+const SUB_SS_ID = '1OhbhJPxep0s5eQKmakgmSjJBIMDEzSN3iRXuGMaOCng';
+const AMENITY_TABS: Record<string, string> = {
+  '2051574635': 'gym',
+  '1433427596': 'swimming',
+  '2028550937': 'tennis',
+  '1913121077': 'combo',
+};
 
 // In/out attendance log lives in a separate spreadsheet, written via a
 // dedicated (write-only) Apps Script deployment. Reads stay on APPS_SCRIPT_URL.
@@ -37,7 +50,7 @@ export interface AttendanceLogRow {
   direction: Direction;
   // Decision/status: PAID | WARN | REGISTER | DENIED | NA (Guest) | '' (checkout)
   subscription: string;
-  // Amenity this device gates (gym/pool/tennis). Auto-filled at enqueue time.
+  // Amenity this device gates (gym/swimming/tennis). Auto-filled at enqueue time.
   amenity?: string;
 }
 
@@ -139,10 +152,19 @@ function parseCSV(text: string): Record<string, string>[] {
   return rows;
 }
 
+// Case-insensitive header lookup (headers vary: "Month" vs "MONTH", trailing
+// spaces, etc.). Spelling variants — e.g. "AMENITY USER" vs the older typo
+// "AMINITY USER" — must still be passed as separate aliases.
 function getCol(row: Record<string, string>, ...keys: string[]): string {
+  const rowKeys = Object.keys(row);
   for (const k of keys) {
-    const val = row[k] || row[k.toLowerCase()] || row[k.toUpperCase()];
-    if (val) return val.trim();
+    const target = k.trim().toLowerCase();
+    for (const rk of rowKeys) {
+      if (rk.trim().toLowerCase() === target) {
+        const v = row[rk];
+        if (v != null && String(v).trim()) return String(v).trim();
+      }
+    }
   }
   return '';
 }
@@ -186,11 +208,123 @@ async function fetchCsvByGid(gid: string): Promise<Record<string, string>[]> {
   return parseCSV(raw);
 }
 
+const MONTHS: Record<string, string> = {
+  jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun',
+  jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec',
+};
+
+/** Normalize a month word + year into "Jul 2026"; '' if not a real month. */
+function normMonth(word: string, yr: string): string {
+  const mon = MONTHS[word.slice(0, 3).toLowerCase()];
+  if (!mon) return '';
+  let y = yr.trim();
+  if (y.length === 2) y = '20' + y;
+  return mon + ' ' + y;
+}
+
+/**
+ * Pull a billing month ("Jul 2026") out of free text — the Payment Description
+ * ("Jul26 - Gym Fee …" / "… until the period of JUL 2026") or an already-clean
+ * "Jul 2026" value. Returns '' if none found (e.g. a date-coerced cell).
+ */
+function monthFromText(text: string): string {
+  const d = text || '';
+  let m = d.match(/until\s+the\s+period\s+of\s+([A-Za-z]{3,9})\s+(\d{4})/i);
+  if (m) return normMonth(m[1], m[2]);
+  m = d.match(/^\s*([A-Za-z]{3,9})\s*'?\s*(\d{2,4})\b/);
+  if (m && MONTHS[m[1].slice(0, 3).toLowerCase()]) return normMonth(m[1], m[2]);
+  m = d.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*'?\s*(\d{2,4})\b/i);
+  if (m) return normMonth(m[1], m[2]);
+  return '';
+}
+
+/** Fetch a tab's rows (objects keyed by header, values coerced to strings). */
+async function fetchSubRowsByGid(gid: string): Promise<Record<string, string>[]> {
+  const url =
+    `${SUB_APPS_SCRIPT_URL}?action=get_rows` +
+    `&gid=${encodeURIComponent(gid)}` +
+    `&ssId=${encodeURIComponent(SUB_SS_ID)}` +
+    `&token=${encodeURIComponent(SHEET_TOKEN)}`;
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error('Subscription fetch failed: ' + res.status);
+  const data = JSON.parse(await res.text());
+  if (!data.ok) throw new Error(data.error || 'Subscription read denied');
+  const rows = data.result && data.result.rows;
+  // A missing `rows` array means the deployed Apps Script predates `get_rows`
+  // (it returned the health payload) — surface that instead of a silent 0.
+  if (!Array.isArray(rows)) {
+    throw new Error('Subscription Apps Script not updated (get_rows missing) — redeploy a new version');
+  }
+  // Cells can come back as numbers/dates; the column helpers expect strings.
+  return rows.map((r: Record<string, unknown>) => {
+    const o: Record<string, string> = {};
+    for (const k of Object.keys(r)) o[k] = r[k] == null ? '' : String(r[k]);
+    return o;
+  });
+}
+
+/**
+ * Which amenities a free-text description names — used to expand a combo row
+ * into one record per covered amenity. A combo can be any mix (gym+swimming,
+ * swim+tennis, all three), so we read the amenities back out of the row's own
+ * Payment Description rather than assuming a fixed pair.
+ */
+function amenitiesFromText(text: string): string[] {
+  const d = (text || '').toLowerCase();
+  const out: string[] = [];
+  if (/gym/.test(d)) out.push('gym');
+  if (/swim/.test(d)) out.push('swimming');
+  if (/tennis/.test(d)) out.push('tennis');
+  return out;
+}
+
+/**
+ * Read the amenities-payment sheet (gym/swimming/tennis/combo tabs) into the
+ * app's Student model. One row per (flat, amenity); a `combo` row is expanded
+ * into one record per amenity it covers, parsed from that row's own Payment
+ * Description (so gating passes on exactly the amenities the resident paid for).
+ *
+ * Sheet columns: S.No. | APT NO. | NAME OF CLIENT | AMINITY USER | MONTH |
+ * Amount | Payment Desription. Gating uses APT NO. (flat) + AMINITY USER (the
+ * per-person name) + the month. The MONTH cell is stored as a date by Sheets,
+ * so the month is derived from the "Payment Desription" text instead.
+ */
+async function fetchSubscriptionStudents(): Promise<Student[]> {
+  const students: Student[] = [];
+  for (const gid of Object.keys(AMENITY_TABS)) {
+    const tabAmenity = AMENITY_TABS[gid];
+    const rows = await fetchSubRowsByGid(gid);
+    for (const row of rows) {
+      const flat = getCol(row, 'APT NO.', 'APT NO', 'FLAT NO.', 'FLAT NO', 'FLAT');
+      if (!flat) continue;
+      // Headers may be correctly spelled ("AMENITY USER", "Payment Description")
+      // or the older typo'd form ("AMINITY USER", "Payment Desription") — accept both.
+      const name = getCol(row, 'AMENITY USER', 'AMINITY USER', 'NAME OF CLIENT');
+      const desc = getCol(row, 'Payment Description', 'Payment Desription', 'Description', 'head');
+      const month = monthFromText(desc) || monthFromText(getCol(row, 'Month', 'MONTH'));
+      // Combo: cover whatever amenities the description names (fall back to the
+      // legacy gym+swimming pair if it can't be parsed). Other tabs: the tab.
+      let amenities: string[];
+      if (tabAmenity === 'combo') {
+        amenities = amenitiesFromText(desc);
+        if (!amenities.length) amenities = ['gym', 'swimming'];
+      } else {
+        amenities = [tabAmenity];
+      }
+      for (const amenity of amenities) {
+        students.push({ flat, name, month, status: 'Paid', type: '', amenity });
+      }
+    }
+  }
+  return students;
+}
+
 /**
  * Pull the Google Sheet into the local database.
- * Sheet columns: Flat No, Name, Month, Type, Paid for, Status.
- * Identity is the Flat No (the sheet has no per-person ID); "Paid for" is a
- * single amenity per row (a flat may have several rows for several amenities).
+ * Subscriptions come from the amenities-payment sheet (gym/swimming/tennis/combo
+ * tabs, columns APT NO. / AMENITY USER / Month / …); identity is the flat, and a
+ * combo row is expanded into gym + swimming records. Roster + face photos still
+ * come from the original read proxy.
  *
  * @param opts.photos when true (default), also download the faces ZIP from
  *   Drive and extract photos. Pass { photos: false } to sync ONLY the
@@ -201,24 +335,8 @@ async function fetchCsvByGid(gid: string): Promise<Record<string, string>[]> {
 export async function syncStudents(opts: { photos?: boolean } = {}): Promise<number> {
   const includePhotos = opts.photos ?? true;
 
-  // 1) Subscription details (Flat No → Paid for) — the gating data.
-  const subRows = await fetchCsvByGid(STUDENTS_GID);
-  const students: Student[] = [];
-  for (const row of subRows) {
-    const flat = getCol(row, 'Flat No', 'Flat', 'Flat Number', 'flat number');
-    if (!flat) continue;
-    const amenity = getCol(row, 'Paid for', 'Paid For', 'Paidfor', 'Subscription', 'Amenity')
-      .trim()
-      .toLowerCase();
-    students.push({
-      flat,
-      name: getCol(row, 'Name'),
-      month: getCol(row, 'Month'),
-      status: getCol(row, 'Status'),
-      type: getCol(row, 'Type'),
-      amenity,
-    });
-  }
+  // 1) Subscription details (APT NO. → amenity) — the gating data.
+  const students = await fetchSubscriptionStudents();
 
   // 2) Student roster (Student ID → Name/Flat) — for ID-based student lookup.
   const rosterRows = await fetchCsvByGid(ROSTER_GID);
@@ -276,4 +394,27 @@ export async function syncStudents(opts: { photos?: boolean } = {}): Promise<num
   await saveRoster(roster);
   await setLastSyncTime(new Date().toISOString());
   return students.length;
+}
+
+export const AUTO_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+let _autoSyncing = false;
+
+/**
+ * Best-effort background sync used by the app shell. Refreshes subscription data
+ * (no photos) when the last successful sync is older than `maxAgeMs`. Safe to
+ * call often — it self-throttles (one at a time, skips if recently synced) and
+ * swallows errors, so a manual "SYNC + PHOTOS" is never blocked.
+ */
+export async function autoSyncIfDue(maxAgeMs = AUTO_SYNC_INTERVAL_MS): Promise<void> {
+  if (_autoSyncing) return;
+  _autoSyncing = true;
+  try {
+    const last = await getLastSyncTime();
+    if (last && Date.now() - new Date(last).getTime() < maxAgeMs) return;
+    await syncStudents({ photos: false });
+  } catch (e) {
+    console.warn('Auto-sync failed (will retry later):', e);
+  } finally {
+    _autoSyncing = false;
+  }
 }

@@ -44,3 +44,7 @@ example
 
 # build artifacts
 *.apk
+
+# resident bank statements / paid lists — PII, never commit
+*.xlsx
+*.xls

@@ -53,6 +53,30 @@ export async function saveLocalStudents(students: Student[]): Promise<void> {
   _cache = deduped;
 }
 
+/**
+ * Locally record a just-completed payment so gating passes immediately (before
+ * the next sheet sync). One Paid record per amenity for the current month; the
+ * backend also writes the durable sheet row. Dedup in saveLocalStudents handles
+ * repeats.
+ */
+export async function addPaidSubscriptions(
+  flat: string,
+  name: string,
+  amenities: string[],
+  month: string,
+): Promise<void> {
+  const all = await getLocalStudents();
+  const additions: Student[] = amenities.map((a) => ({
+    flat: flat.trim(),
+    name: name.trim(),
+    month,
+    status: 'Paid',
+    type: '',
+    amenity: a.trim().toLowerCase(),
+  }));
+  await saveLocalStudents([...all, ...additions]);
+}
+
 /** Best record for a flat: the current-month row if present, else any row (for display). */
 export async function getStudentByFlat(flat: string): Promise<Student | null> {
   const all = await getLocalStudents();
@@ -410,18 +434,22 @@ export async function saveFamilyRoster(
 }
 
 /**
- * Family members to offer for a flat, merged from three sources and de-duped by
- * (normalized) name: the synced Family Members tab (has gender), the names on
- * the synced subscription rows for the flat (no gender), and locally-remembered
- * check-ins (has gender). Gender precedence: roster > history > subscription.
+ * Family members to offer for a flat, merged from two sources and de-duped by
+ * (normalized) name: the synced Family Members roster (has gender) and
+ * locally-remembered check-ins (has gender). Gender precedence: roster > history.
+ *
+ * We deliberately do NOT seed from the subscription rows: on a family flat the
+ * subscription name is the OWNER who paid the fee, not the family members who
+ * actually check in. So the resident picks a previously-used name or types a new
+ * one (remembered for next time). Family gating is by flat-paid-this-month, so
+ * the chosen name never affects whether entry is allowed.
  */
 export async function getFamilySuggestions(flat: string): Promise<FamilyMember[]> {
   const key = flat.trim().toLowerCase();
   if (!key) return [];
-  const [roster, history, students] = await Promise.all([
+  const [roster, history] = await Promise.all([
     getFamilyRoster(),
     getFamilyMembers(flat),
-    getLocalStudents(),
   ]);
 
   const byName = new Map<string, FamilyMember>();
@@ -438,7 +466,6 @@ export async function getFamilySuggestions(flat: string): Promise<FamilyMember[]
 
   for (const m of roster[key] || []) add(m.name, m.gender);
   for (const m of history) add(m.name, m.gender);
-  for (const s of students) if (s.flat.trim().toLowerCase() === key) add(s.name, '');
   return Array.from(byName.values());
 }
 

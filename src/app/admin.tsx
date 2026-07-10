@@ -22,7 +22,7 @@ import {
   setDeployedAmenity,
 } from '@/services/storage';
 
-const FALLBACK_AMENITIES = ['gym', 'tennis', 'pool'];
+const FALLBACK_AMENITIES = ['gym', 'tennis', 'swimming'];
 
 export default function AdminScreen() {
   const router = useRouter();
@@ -164,7 +164,10 @@ export default function AdminScreen() {
         {syncMessage && <Text style={styles.syncMessage}>{syncMessage}</Text>}
 
         <Text style={styles.section}>REPORTS</Text>
-        <TouchableOpacity style={[styles.actBtn, styles.actDark]} onPress={() => router.push('/export')}>
+        <TouchableOpacity style={[styles.actBtn, styles.actDark]} onPress={() => router.push('/collections')}>
+          <Text style={styles.actDarkText}>💰  TODAY'S COLLECTIONS</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.actBtn, styles.actDark, styles.actSpaced]} onPress={() => router.push('/export')}>
           <Text style={styles.actDarkText}>📄  EXPORT REPORT (PDF)</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.actBtn, styles.actDark, styles.actSpaced]} onPress={() => router.push('/defaulters')}>

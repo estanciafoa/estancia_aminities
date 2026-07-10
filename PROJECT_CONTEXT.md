@@ -63,21 +63,108 @@ Both log an `OUT` row, remove the person from the device-local checked-in regist
 
 ## Data architecture
 
-### Two Google Apps Script web apps (token-guarded, `token = Admin2026`)
+### Google Apps Script web apps (token-guarded, `token = Admin2026`)
 
 | Purpose | URL ends in | Actions | Backs |
 |---------|-------------|---------|-------|
 | **Read proxy** | `…3Dwrgfm7pkw` | `get_csv`, `get_zip` | Subscriptions sheet + faces ZIP (also reused to read the log sheet for reports) |
 | **Write app** | `…Xyii-v4DjQ` | `append_log` | Attendance log sheet |
+| **Subscription writer** | *(deploy + paste URL into `admin.html` & `sheets.ts`)* | `insert_rows`, `existing_keys`, `get_rows` | Amenity payments sheet (gym/swimming/tennis/combo tabs) — write **and** the app's gating read |
+| **Razorpay payments** | *(deploy `razorpay-payments.gs`; post URL/QR at gates)* | `doGet` page + `confirm`; `doPost` `webhook` | Resident self-serve payment → writes "paid" rows into the same amenity payments sheet |
 
-The deployed `Code.gs` for the write app **is** `apps-script/log-writer.gs`
-(self-contained; paste the whole file, Deploy ▸ Manage deployments ▸ New version).
+The deployed `Code.gs` for the log write app **is** `apps-script/log-writer.gs`;
+for the subscription writer it **is** `apps-script/subscription-writer.gs`
+(both self-contained; paste the whole file, Deploy ▸ Manage deployments ▸ New version).
 There is no longer an `append_log.gs` — it was a redundant snippet for an
 alternative "bolt onto the read proxy" approach and was deleted.
 
+### Razorpay QR payment at the kiosk (primary flow)
+On an unpaid check-in the decision overlay shows **PAY NOW** (`decision-overlay.tsx` `onPayNow`,
+wired from `attendance-form.tsx` + `student.tsx`) → **`src/app/pay.tsx`**: tick Gym/Swimming/Tennis,
+the **Amount Payable** is the price whose **category (Student/Family) + Covers set** match the
+selection (`amountForSet`), tap **SHOW QR CODE** → the app calls `razorpay-payments.gs` `create_qr`,
+which creates a **Razorpay Payment Link** and returns its URL; the app renders that URL as a **QR
+on-device** (`qrcode-generator`, GIF data-URI — no native dep) for the resident to scan & pay with any
+UPI app. (Razorpay's QR-Codes API was NOT enabled on the account, but Payment Links are — so we render
+the link URL as the QR.) It polls `qr_status` (link status); on payment the backend writes the paid
+row(s) — bank-statement style description (`"Jul26 - Combo pack of Gym, Swimming & Tennis for Flat
+No. 1137 : Name"`, single → `"Jul26 - Gym Fee for Flat No. …"`), single amenity → its tab, 2+ →
+combo tab; idempotent on flat+month+covers. The app
+`addPaidSubscriptions` locally + auto-checks-in for this gate. Client: `src/services/payments.ts`
+(`PAY_APPS_SCRIPT_URL` = deployed `/exec`; `PAY_TOKEN` matches the script). Needs kiosk internet.
+
+### `apps-script/razorpay-payments.gs` — Razorpay backend (QR endpoints + resident self-serve page)
+Endpoints: `create_qr` / `qr_status` (kiosk QR, token=`PAY_TOKEN`), `packages` (prices), plus the
+older resident-phone Payment-Link page (`doGet` default + `confirm` callback + `webhook`). **Prices
+are hardcoded** in the `PACKAGES_` array (per category Student/Family × amenity combination) — edit
+there, no sheet needed. Razorpay keys are read from **Script Properties** (`RAZORPAY_KEY_ID` /
+`RAZORPAY_KEY_SECRET` via `PropertiesService`), so the file carries no secret and is safe to commit.
+A new web app (deploy separately, Execute as Me / Anyone). A resident opens its
+`/exec` URL on their **own** phone (post the URL / a QR at each gate), picks a
+**package** + month, enters flat + name, sees the price, and taps Pay. It creates
+a **Razorpay Payment Link** server-side (key secret stays in the script) and hands
+back the `short_url`. On payment it writes a **"paid" row** into the subscription
+sheet in the exact layout `sheets.ts` reads — a **single-amenity** package goes to
+its own tab; a **multi-amenity** package goes to the **combo** tab with a
+Payment Description that both begins with the clean month (`monthFromText`) **and
+names the covered amenities** (e.g. `"Jul 2026 - Gym & Swimming for Flat 1137 : …"`)
+so the app's `amenitiesFromText` grants exactly those. **Kiosk needs no code change**;
+gating works after its next sync. Two authoritative confirmation paths, both re-fetch
+the link from Razorpay's authed API before writing and are **idempotent** on the
+payment id: (1) `callback_url → doGet(action=confirm)` verifies the payment-link
+callback signature (query params, readable in `doGet`); (2) `doPost(action=webhook&token=…)`
+backstop (Apps Script **can't read the `X-Razorpay-Signature` header**, so the URL
+is token-guarded and we re-verify via the API). Prices are hardcoded in `PACKAGES_`.
+Before the kiosk QR flow works: add the Razorpay keys in Apps Script **Project Settings ▸
+Script Properties** (`RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`), deploy the web app, and paste
+its `/exec` URL into `PAY_APPS_SCRIPT_URL` in `src/services/payments.ts`.
+
+### `admin.html` — standalone subscription-sheet updater (browser tool, not in the app)
+Open `admin.html` in a browser to load monthly bank-statement exports
+(`Gym Paid Llist.xlsx`, `Gym & Swimming.xlsx`, `Tennis.xlsx` — title row + blank +
+`Slno | Flat No. | Name | Description | … | Amount`). It parses each file with SheetJS
+(CDN), lets the admin pick the target tab, previews normalized rows, and POSTs
+`{action:'insert_rows', token, ssId, gid, rows:[[S.No., APT NO., NAME OF CLIENT, Amount]]}`
+to the subscription writer, which **inserts them at the top** of the chosen tab (below the
+header — nothing is cleared). Set `ENDPOINT` in the file to the deployed `/exec` URL first.
+**Combined statements:** a file that mixes amenities is auto-detected and shown in **SPLIT BY
+AMENITY** mode (toggle per card) — each row is classified from its Description (`classifyAmenity`:
+counts the amenity keywords present → **2 or more ⇒ `combo`** (e.g. "Gym and Swimming …",
+"Combo pack of Swim & Tennis …"), else the single `tennis`/`swimming`/`gym`; the bare word "combo"
+is NOT keyed on, so "Tennis Court … Combo Balance for Tennis" stays tennis) and PUSH fans the rows
+out to the tabs in separate batches. Column detection is tolerant (flat = `Flat No.`/`APT NO.`/**`USN`**,
+description = `Payment Description`/`Description`/`head`). **Comma-in-description overflow:** a bank
+export like "CUB Report" splits a description containing a comma (e.g. "Combo pack of Gym, Swimming &
+Tennis") into extra columns, pushing **Amount** rightward. Since Amount is the last column, the parser
+reads Amount from the row's last non-empty cell and rebuilds the description by joining the cells
+between its start and the trailing columns (restoring the comma) — so classification + amount stay
+correct. The preview shows only matched rows; unrecognized ("other")
+rows are dropped from the preview and skipped on push (header shows an "N skipped" tally). Before
+each batch, **duplicates are automatically dropped, not prompted** (`dedupeRows` + `existing_keys`
+action) — key = **APT NO. + AMENITY USER + Month** (identifies the same subscription regardless of
+which statement it came from; the S.No. differs per statement so it is NOT in the key, else the same
+person re-appears from a second file). The server derives Month from the Payment Description text
+(the Month cell is date-coerced by Sheets). **Redeploy `subscription-writer.gs`** after any key
+change so the sheet-side check matches the client. Target sheet
+`1OhbhJPxep0s5eQKmakgmSjJBIMDEzSN3iRXuGMaOCng`; tab gids gym `2051574635`, swimming `1433427596`,
+tennis `2028550937`, combo `1913121077`. Columns: `S.No. | APT NO. | NAME OF CLIENT | AMENITY USER
+| Month | Amount | Payment Description` (AMENITY USER + Month are parsed out of the bank
+statement's Description text).
+
 ### Spreadsheets
-- Spreadsheet id `1EDvYjDQVIpwib5PmQ5sbSchJI_B5HNHWNomXRLOxtk4` has **two tabs the app syncs**:
-  - **Subscriptions** — gid `716123554`. Columns: `Flat No, Name, Month, Type (Student|Family), Paid for (single amenity), Status`. Gating data, keyed by **Flat No**. `Paid for` is one amenity per row; a flat with several amenities has several rows.
+- **Subscriptions (gating source)** — sheet `1OhbhJPxep0s5eQKmakgmSjJBIMDEzSN3iRXuGMaOCng`, read by
+  the app via the **subscription writer** `get_rows` action (ssId passed explicitly). One tab per
+  amenity: gym `2051574635`, swimming `1433427596`, tennis `2028550937`, combo `1913121077`.
+  `fetchSubscriptionStudents` (`sheets.ts`) maps each row → `Student{flat=APT NO., name=AMENITY
+  USER, month=Month, amenity=<tab>}`; a **combo** row is expanded into one record per amenity it
+  covers — parsed from that row's own **Payment Description** via `amenitiesFromText` (gym/swimming/
+  tennis, any mix; falls back to gym+swimming if unparseable) — so the exact-match `coversAmenity`
+  gate passes on exactly what was paid for. Combos of any mix (gym+swim, swim+tennis, …) all live in
+  the single **combo** tab; the app validates coverage from each row's description. The amenity vocabulary is **gym / swimming /
+  tennis** (the old `pool` term was renamed to `swimming`; a device previously deployed as `pool`
+  must re-pick `swimming` in Admin). The old subscription tab `1EDvYjD…/gid 716123554` is no longer
+  read.
+- Spreadsheet id `1EDvYjDQVIpwib5PmQ5sbSchJI_B5HNHWNomXRLOxtk4` still hosts the **roster the app syncs**:
   - **Student roster ("Student id")** — gid `0`. Columns: `Name, Flat, ValidFrom, ValidTill, Aadhar, Mobile, ID, Update`. Maps **Student ID (`ID`) → Name + Flat**. Face photos are named by this **Student ID**.
   - **Student flow:** student enters/scans their **Student ID** → roster resolves name/flat/photo → gate requires the **flat + name combination** to exist in the subscription rows for the deployed amenity. Name match is tolerant (`namesSimilar`: the FIRST name — first significant word ≥3 letters — must agree, with containment + Levenshtein typo tolerance; trailing last names and initials are ignored). E.g. "Saravanan Sengamalam" ~ "saravanan" ~ "saravanan.s" (match), but ≠ "sengamalam". Family/Guest still gate by flat only.
 - **Attendance log:** id `1FDIJ5xJWDG6BTwf_jwn8QQIurZY7x2NI4xpxFEbM_80`, gid `1191732374`

@@ -275,7 +275,24 @@ export default function StudentScreen() {
           <Text style={styles.cancelText}>CANCEL / SCAN AGAIN</Text>
         </TouchableOpacity>
 
-        <DecisionOverlay result={overlay} onDismiss={dismissOverlay} />
+        <DecisionOverlay
+          result={overlay}
+          onDismiss={dismissOverlay}
+          onPayNow={() => {
+            setOverlay(null);
+            // '/pay' route types regenerate under `expo start`; cast until then.
+            router.push({
+              pathname: '/pay' as any,
+              params: {
+                flat: student?.flat || '',
+                name: student?.name || '',
+                category: 'Student',
+                gender: '',
+                student_id: scannedId,
+              },
+            });
+          }}
+        />
       </SafeAreaView>
     );
   }
