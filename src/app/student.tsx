@@ -164,7 +164,7 @@ export default function StudentScreen() {
       const id = scannedId;
       const flat = student?.flat || '';
       const name = student?.name || '';
-      const result = await decideEntry({ category: 'Student', flat, name });
+      const result = await decideEntry({ category: 'Student', flat, name, studentId: id });
 
       if (result.allowed) {
         await addCheckedIn({

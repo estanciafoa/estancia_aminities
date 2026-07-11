@@ -121,7 +121,7 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
     setSubmitting(true);
     setPayPerson({ name: pName, gender: pGender });
     try {
-      const result = await decideEntry({ category, flat });
+      const result = await decideEntry({ category, flat, name: pName });
 
       if (result.allowed) {
         await addCheckedIn({

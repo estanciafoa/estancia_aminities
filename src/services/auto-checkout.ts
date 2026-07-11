@@ -1,11 +1,13 @@
 import { enqueueLog } from './log-queue';
+import { getSession, SESSION_MAX_MS } from './session';
 import { getAutoCheckoutHours, getCheckedIn, removeCheckedIn, todayKey } from './storage';
 
 /**
  * Close stale "inside" sessions: anyone still checked in from a previous day,
- * or longer than the configured max hours. Each is logged as an OUT with status
- * 'AUTO' and removed from the device-local registry. Safe to call often.
- * Returns the number of sessions auto-closed.
+ * past the 2-hour workout cap (measured from their FIRST check-in of the day),
+ * or longer than the configured backstop max hours. Each is logged as an OUT
+ * with status 'AUTO' and removed from the device-local registry. Safe to call
+ * often. Returns the number of sessions auto-closed.
  */
 export async function autoCheckoutStale(): Promise<number> {
   const list = await getCheckedIn();
@@ -18,9 +20,15 @@ export async function autoCheckoutStale(): Promise<number> {
 
   for (const e of list) {
     const at = new Date(e.checkInAt);
-    const ageHours = (now - at.getTime()) / 3_600_000;
+    // The 2-hour cap runs from the FIRST check-in of the day, so a re-entry
+    // (which bumps the registry's checkInAt) can't extend the workout. Fall
+    // back to checkInAt if no session record is found.
+    const session = await getSession(e.key);
+    const firstIn = session ? Date.parse(session.firstInAt) : at.getTime();
+    const ageMs = now - (isFinite(firstIn) ? firstIn : at.getTime());
+    const ageHours = ageMs / 3_600_000;
     const fromEarlierDay = isFinite(at.getTime()) && dayKey(at) !== today;
-    if (!(fromEarlierDay || ageHours >= maxHours)) continue;
+    if (!(fromEarlierDay || ageMs >= SESSION_MAX_MS || ageHours >= maxHours)) continue;
 
     await enqueueLog({
       category: e.category,

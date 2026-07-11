@@ -1,5 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { recordCheckIn, recordCheckOut } from './session';
+
 const STUDENTS_KEY = '@estancia_amenities_students';
 const LAST_SYNC_KEY = '@estancia_amenities_last_sync';
 
@@ -40,7 +42,7 @@ export async function getLocalStudents(): Promise<Student[]> {
   return _cache!;
 }
 
-export async function saveLocalStudents(students: Student[]): Promise<void> {
+export async function saveLocalStudents(students: Student[]): Promise<number> {
   // Deduplicate by flat+name+amenity+month so every subscription row is kept
   // (a flat may have several rows — e.g. gym + tennis, or family + student).
   const map = new Map<string, Student>();
@@ -51,6 +53,7 @@ export async function saveLocalStudents(students: Student[]): Promise<void> {
   const deduped = Array.from(map.values());
   await AsyncStorage.setItem(STUDENTS_KEY, JSON.stringify(deduped));
   _cache = deduped;
+  return deduped.length; // stored (deduped) count — what the app actually gates on
 }
 
 /**
@@ -504,11 +507,15 @@ export async function addCheckedIn(entry: CheckedInEntry): Promise<void> {
   const filtered = list.filter((e) => e.key !== entry.key);
   filtered.push(entry);
   await AsyncStorage.setItem(CHECKED_IN_KEY, JSON.stringify(filtered));
+  // Open/continue today's amenity session (drives the re-entry + 2h rules).
+  await recordCheckIn(entry.key, Date.parse(entry.checkInAt) || Date.now());
 }
 
 export async function removeCheckedIn(key: string): Promise<void> {
   const list = await getCheckedIn();
   await AsyncStorage.setItem(CHECKED_IN_KEY, JSON.stringify(list.filter((e) => e.key !== key)));
+  // Stamp the checkout time so a later re-entry can be gap-checked.
+  await recordCheckOut(key);
 }
 
 export async function getCheckedInByFlat(flat: string): Promise<CheckedInEntry[]> {

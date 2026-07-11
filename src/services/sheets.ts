@@ -1,6 +1,7 @@
 import { attachLocalPhotos, importPhotosFromBase64 } from './photos';
 import {
   getLastSyncTime,
+  monthMatchesCurrent,
   saveFamilyRoster,
   saveLocalStudents,
   saveRoster,
@@ -302,6 +303,8 @@ async function fetchSubscriptionStudents(): Promise<Student[]> {
       const name = getCol(row, 'AMENITY USER', 'AMINITY USER', 'NAME OF CLIENT');
       const desc = getCol(row, 'Payment Description', 'Payment Desription', 'Description', 'head');
       const month = monthFromText(desc) || monthFromText(getCol(row, 'Month', 'MONTH'));
+      // Current-month subscriptions only — skip rows for other (past/future) months.
+      if (!monthMatchesCurrent(month)) continue;
       // Combo: cover whatever amenities the description names (fall back to the
       // legacy gym+swimming pair if it can't be parsed). Other tabs: the tab.
       let amenities: string[];
@@ -390,10 +393,12 @@ export async function syncStudents(opts: { photos?: boolean } = {}): Promise<num
     /* ignore */
   }
 
-  await saveLocalStudents(students);
+  // Return the stored (deduped) count, not the raw row count, so the number
+  // shown right after sync matches what's persisted and re-shown on re-entry.
+  const storedCount = await saveLocalStudents(students);
   await saveRoster(roster);
   await setLastSyncTime(new Date().toISOString());
-  return students.length;
+  return storedCount;
 }
 
 export const AUTO_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour

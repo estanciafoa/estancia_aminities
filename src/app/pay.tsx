@@ -107,7 +107,7 @@ export default function PayScreen() {
       try {
         await addPaidSubscriptions(flat, name, granted, currentMonthLabel());
         // Now that they're paid, complete the check-in for this gate if allowed.
-        const result = await decideEntry({ category, flat, name });
+        const result = await decideEntry({ category, flat, name, studentId });
         if (result.allowed) {
           await addCheckedIn({
             key: checkedInKey(category, { flat, name, studentId }),

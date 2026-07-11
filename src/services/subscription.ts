@@ -1,6 +1,10 @@
-import { getDeployedAmenity, isFlatPaidThisMonth, isStudentPaidThisMonth, type Category } from './storage';
+import { checkedInKey, getDeployedAmenity, isFlatPaidThisMonth, isStudentPaidThisMonth, type Category } from './storage';
+import { evaluateEntry } from './session';
 
-export type Decision = 'PAID' | 'WARN' | 'REGISTER' | 'DENIED' | 'NA';
+// 'LIMIT' = allowed by payment but blocked by the daily frequency / 2-hour rule.
+// Kept distinct from 'DENIED' so time-limit blocks don't show up as unpaid
+// defaulters in the reports.
+export type Decision = 'PAID' | 'WARN' | 'REGISTER' | 'DENIED' | 'LIMIT' | 'NA';
 
 export interface DecisionResult {
   decision: Decision;
@@ -57,6 +61,7 @@ export async function decideEntry(input: {
   category: Category;
   flat?: string;
   name?: string;
+  studentId?: string;
 }): Promise<DecisionResult> {
   const day = new Date().getDate();
   if (input.category === 'Guest') return decide('Guest', false, day);
@@ -67,5 +72,27 @@ export async function decideEntry(input: {
     input.category === 'Student'
       ? await isStudentPaidThisMonth(input.flat || '', input.name || '', amenity)
       : await isFlatPaidThisMonth(input.flat || '', amenity);
-  return decide(input.category, paid, day);
+  const result = decide(input.category, paid, day);
+
+  // Payment says they may enter — now apply the daily frequency / 2-hour rule.
+  // A block here overrides to a LIMIT denial (buzzer + full-screen message).
+  if (result.allowed) {
+    const key = checkedInKey(input.category, {
+      flat: input.flat,
+      name: input.name,
+      studentId: input.studentId,
+    });
+    const gate = await evaluateEntry(key);
+    if (!gate.allowed) {
+      return {
+        decision: 'LIMIT',
+        allowed: false,
+        buzzer: true,
+        overlay: true,
+        title: gate.title || 'Entry Denied',
+        message: gate.message || 'Re-entry is not allowed right now.',
+      };
+    }
+  }
+  return result;
 }
