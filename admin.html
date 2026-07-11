@@ -37,6 +37,11 @@
     }
     header h1 { font-size: 18px; font-weight: 900; letter-spacing: 2px; margin: 0; }
     header .sub { font-size: 12px; color: #94A3B8; font-weight: 700; letter-spacing: 1px; }
+    header .sheet-link {
+      margin-left: auto; font-size: 13px; font-weight: 800; color: #fff; text-decoration: none;
+      background: var(--blue); padding: 8px 14px; border-radius: 8px; white-space: nowrap;
+    }
+    header .sheet-link:hover { background: #0047d6; }
     main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 80px; }
 
     .config-warn {
@@ -114,6 +119,7 @@
   <header>
     <h1>SUBSCRIPTION SHEET UPDATER</h1>
     <span class="sub">Estancia Amenities · gym / swimming / tennis / combo</span>
+    <a id="sheetLink" class="sheet-link" target="_blank" rel="noopener" style="display:none">📄 Open sheet to verify ↗</a>
   </header>
 
   <main>
@@ -159,6 +165,13 @@
     const $cards = document.getElementById('cards');
     const $log = document.getElementById('log');
     const $pushAll = document.getElementById('pushAll');
+
+    // Header link to open the target sheet so a push can be verified visually.
+    const $sheetLink = document.getElementById('sheetLink');
+    if (SHEET_ID) {
+      $sheetLink.href = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/edit';
+      $sheetLink.style.display = '';
+    }
     if (!ENDPOINT) document.getElementById('configWarn').style.display = '';
 
     function log(msg, cls) {
