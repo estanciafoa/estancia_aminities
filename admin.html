@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Estancia Amenities — Subscription Sheet Updater</title>
+  <title>Estancia — Admin</title>
   <!-- SheetJS (xlsx/xls parser). Real browser page, so a CDN is fine.
        To run fully offline, download xlsx.full.min.js next to this file and
        change the src below to "./xlsx.full.min.js". -->
@@ -18,6 +18,7 @@
       --bg: #F8FAFC;
       --ok: #16A34A;
       --err: #DC2626;
+      --warn: #B45309;
     }
     * { box-sizing: border-box; }
     body {
@@ -43,6 +44,17 @@
     }
     header .sheet-link:hover { background: #0047d6; }
     main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 80px; }
+
+    /* ---- Tab bar ---------------------------------------------------------- */
+    .tabs { display: flex; background: var(--ink); padding: 0 24px; }
+    .tabs .tab-btn {
+      background: none; border: none; color: #94A3B8; cursor: pointer;
+      font-size: 12px; font-weight: 900; letter-spacing: 1px;
+      padding: 12px 16px; border-bottom: 3px solid transparent;
+    }
+    .tabs .tab-btn:hover { color: #fff; }
+    .tabs .tab-btn.active { color: #fff; border-bottom-color: var(--blue); }
+    [hidden] { display: none !important; }
 
     .config-warn {
       background: #FEF3C7; border: 1px solid #FDE68A; color: #92400E;
@@ -113,16 +125,63 @@
       margin-top: 28px; font-size: 12px; font-family: ui-monospace, Menlo, monospace;
       color: var(--muted); white-space: pre-wrap; line-height: 1.6;
     }
+
+    /* ---- Gas panel --------------------------------------------------------
+       Ported from est-meter-reader/admin.html. Every rule is scoped to
+       #panel-gas: that page styles bare `button` / `label` / `input` / `.card`
+       / `.msg`, which would otherwise clobber the uploader above. */
+    #panel-gas { max-width: 760px; }
+    #panel-gas .warn-box {
+      background: #FEF3C7; border: 1px solid #FDE68A; color: #92400E;
+      border-radius: 10px; padding: 12px 16px; font-size: 13px; font-weight: 700; margin-bottom: 20px;
+    }
+    #panel-gas .warn-box code { background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 4px; }
+    #panel-gas .card { padding: 20px; }
+    #panel-gas .card h2 {
+      font-size: 14px; font-weight: 800; letter-spacing: .5px;
+      text-transform: uppercase; color: var(--muted); margin: 0 0 14px;
+    }
+    #panel-gas label {
+      display: block; font-size: 12px; font-weight: 800; color: var(--muted);
+      letter-spacing: .5px; margin: 14px 0 6px;
+    }
+    #panel-gas input[type=number] {
+      width: 100%; font-size: 18px; font-weight: 700; padding: 12px 14px;
+      border: 1px solid #CBD5E1; border-radius: 10px; color: var(--ink); background: #fff;
+    }
+    #panel-gas .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+    #panel-gas .row > div { flex: 1 1 180px; }
+    #panel-gas .gross { font-size: 14px; font-weight: 800; color: var(--blue); margin-top: 10px; }
+    #panel-gas .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+    #panel-gas button {
+      background: var(--blue); color: #fff; border: none; border-radius: 10px;
+      font-weight: 800; font-size: 14px; letter-spacing: .5px; padding: 12px 22px;
+      cursor: pointer; margin-top: 18px;
+    }
+    #panel-gas button.ghost { background: #fff; color: var(--ink); border: 1px solid #CBD5E1; font-size: 12px; padding: 8px 14px; }
+    #panel-gas button:disabled { opacity: .5; cursor: default; }
+    #panel-gas .msg { font-size: 13px; font-weight: 700; margin-top: 12px; min-height: 18px; padding: 0; }
+    #panel-gas .msg.warn { color: var(--warn); }
+    #gasLog {
+      margin-top: 24px; font-size: 12px; font-family: ui-monospace, Menlo, monospace;
+      color: var(--muted); white-space: pre-wrap; line-height: 1.6;
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1>SUBSCRIPTION SHEET UPDATER</h1>
-    <span class="sub">Estancia Amenities · gym / swimming / tennis / combo</span>
+    <h1>ESTANCIA — ADMIN</h1>
+    <span id="headerSub" class="sub"></span>
     <a id="sheetLink" class="sheet-link" target="_blank" rel="noopener" style="display:none">📄 Open sheet to verify ↗</a>
   </header>
 
+  <nav class="tabs">
+    <button class="tab-btn" data-panel="subs">SUBSCRIPTIONS</button>
+    <button class="tab-btn" data-panel="gas">GAS READING</button>
+  </nav>
+
   <main>
+   <section id="panel-subs" class="panel">
     <div id="configWarn" class="config-warn" style="display:none">
       ⚠️ <code>ENDPOINT</code> is not set. Deploy <code>apps-script/subscription-writer.gs</code>
       and paste its <code>/exec</code> URL into the top of this file to enable pushing.
@@ -142,6 +201,35 @@
     <button id="pushAll" class="pushall" style="display:none">PUSH ALL TO SHEET</button>
 
     <div id="log"></div>
+   </section>
+
+   <section id="panel-gas" class="panel" hidden>
+    <div id="gasWarnBox" class="warn-box" style="display:none">
+      ⚠️ <code>GAS_ENDPOINT</code> is not set. Deploy
+      <code>est-meter-reader/apps-script/meter-writer.gs</code> as a Web App and paste its
+      <code>/exec</code> URL into the <code>GAS_ENDPOINT</code> constant in this file's script.
+    </div>
+
+    <div class="card">
+      <h2>Gas rate (₹ per kg)</h2>
+      <div class="row">
+        <div>
+          <label for="gasBaseRate">Base rate / kg (before GST)</label>
+          <input type="number" id="gasBaseRate" step="0.01" min="0" placeholder="64.91" />
+        </div>
+        <div>
+          <button id="gasSaveRate">Save rate</button>
+        </div>
+      </div>
+      <div class="gross" id="gasGrossOut">Gross (incl. 5% GST): —</div>
+      <div class="hint">The gross = ROUND(base × 1.05, 2) drives every row's Amount
+        (e.g. base 64.91 → gross 68.16). Applied to newly seeded month tabs.</div>
+      <div class="msg" id="gasRateMsg"></div>
+      <button id="gasChangeToken" class="ghost">Change admin token</button>
+    </div>
+
+    <div id="gasLog"></div>
+   </section>
   </main>
 
   <script>
@@ -166,12 +254,8 @@
     const $log = document.getElementById('log');
     const $pushAll = document.getElementById('pushAll');
 
-    // Header link to open the target sheet so a push can be verified visually.
-    const $sheetLink = document.getElementById('sheetLink');
-    if (SHEET_ID) {
-      $sheetLink.href = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/edit';
-      $sheetLink.style.display = '';
-    }
+    // The header sheet link is per-tab, so the tab bar at the bottom of this
+    // file owns it (it points at whichever sheet the active tab writes to).
     if (!ENDPOINT) document.getElementById('configWarn').style.display = '';
 
     function log(msg, cls) {
@@ -725,6 +809,128 @@
       $dz.addEventListener(ev, (e) => { e.preventDefault(); $dz.classList.remove('drag'); }));
     $dz.addEventListener('drop', (e) => { if (e.dataTransfer) handleFiles(e.dataTransfer.files); });
     $pushAll.addEventListener('click', pushAll);
+  </script>
+
+  <script>
+    // ---- Gas reading tab ---------------------------------------------------
+    // Ported from est-meter-reader/admin.html. Keep in sync with that repo's
+    // apps-script/meter-writer.gs & meters.ts. Different sheet and different
+    // deployment from the subscription uploader above.
+    const GAS_ENDPOINT = 'https://script.google.com/macros/s/AKfycbzI8_uAZatJUo18mTz-at_rjeQlCEaG4FRFZlESajKDQ6igP7vJy1obA967xaInMDl20A/exec';
+    const GAS_SHEET_ID = '1i9eHZ3Q1qQMBiuOQOicFyn94fGs67HPhpn0HuYxZNJU';
+
+    // Everything else lives in a closure: the source page defines log/post/$/msg
+    // at top level, which would collide with the uploader's own globals.
+    (function () {
+      const $ = (id) => document.getElementById(id);
+      if (!GAS_ENDPOINT) $('gasWarnBox').style.display = '';
+
+      // The admin token is NOT stored in the repo. It's kept in this browser's
+      // localStorage; you're prompted the first time the GAS READING tab is
+      // opened, then it's remembered on this device.
+      let TOKEN = localStorage.getItem('gasAdminToken') || '';
+      function ensureToken() {
+        if (!TOKEN) {
+          TOKEN = (prompt('Enter the gas admin write token') || '').trim();
+          if (TOKEN) localStorage.setItem('gasAdminToken', TOKEN);
+        }
+        return TOKEN;
+      }
+
+      function log(m) { $('gasLog').textContent += (new Date().toLocaleTimeString() + '  ' + m + '\n'); }
+      function msg(el, text, cls) { const e = $(el); e.textContent = text; e.className = 'msg ' + (cls || ''); }
+      function round2(n) { return Math.round(n * 100) / 100; }
+      function showGross(base) {
+        const b = parseFloat(base);
+        $('gasGrossOut').textContent = 'Gross (incl. 5% GST): ' + (isNaN(b) ? '—' : round2(b * 1.05).toFixed(2));
+      }
+
+      // POST JSON as text/plain to avoid a CORS preflight (Apps Script pattern).
+      async function post(body) {
+        const res = await fetch(GAS_ENDPOINT, {
+          method: 'POST', redirect: 'follow',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(Object.assign({ token: TOKEN, ssId: GAS_SHEET_ID }, body)),
+        });
+        const text = await res.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch (_) { throw new Error('Unreadable reply — is the deployment up to date?'); }
+        if (!data.ok) throw new Error(data.error || 'server rejected');
+        return data.result || {};
+      }
+
+      // ---- Rate ------------------------------------------------------------
+      async function loadRate() {
+        if (!GAS_ENDPOINT || !ensureToken()) return;
+        try {
+          const r = await post({ action: 'get_config' });
+          $('gasBaseRate').value = r.baseRate;
+          showGross(r.baseRate);
+          msg('gasRateMsg', '', '');
+        } catch (e) { msg('gasRateMsg', 'Could not load rate: ' + e.message, 'err'); }
+      }
+
+      $('gasBaseRate').addEventListener('input', (e) => showGross(e.target.value));
+      $('gasSaveRate').addEventListener('click', async () => {
+        if (!ensureToken()) return msg('gasRateMsg', 'A write token is required to save.', 'err');
+        const base = parseFloat($('gasBaseRate').value);
+        if (isNaN(base) || base <= 0) return msg('gasRateMsg', 'Enter a valid rate.', 'err');
+        $('gasSaveRate').disabled = true;
+        try {
+          const r = await post({ action: 'set_config', baseRate: base });
+          showGross(r.baseRate);
+          msg('gasRateMsg', '✓ Saved. Base ' + r.baseRate + ' → gross ' + r.grossRate + '.', 'ok');
+          log('Rate saved: base ' + r.baseRate + ', gross ' + r.grossRate);
+        } catch (e) { msg('gasRateMsg', '✗ ' + e.message, 'err'); }
+        finally { $('gasSaveRate').disabled = false; }
+      });
+
+      // A mistyped token is otherwise stuck in localStorage with no way back.
+      $('gasChangeToken').addEventListener('click', () => {
+        localStorage.removeItem('gasAdminToken');
+        TOKEN = '';
+        if (ensureToken()) loadRate();
+      });
+
+      // Reading the rate needs the token, so it's deferred until the tab is
+      // actually opened — otherwise the uploader would prompt for a gas token.
+      let loaded = false;
+      document.addEventListener('tabshown', (e) => {
+        if (e.detail !== 'gas' || loaded) return;
+        loaded = true;
+        loadRate();
+      });
+    })();
+  </script>
+
+  <script>
+    // ---- Tab bar -----------------------------------------------------------
+    // One admin page, two tools against two different sheets. The header
+    // subtitle and sheet link belong to whichever tab is showing.
+    (function () {
+      const PANELS = {
+        subs: { sub: 'Estancia Amenities · gym / swimming / tennis / combo', sheet: SHEET_ID, link: '📄 Open sheet to verify ↗' },
+        gas:  { sub: 'Estancia Gas · rate & monthly sheet setup', sheet: GAS_SHEET_ID, link: '📄 Open gas sheet ↗' },
+      };
+      const $sub = document.getElementById('headerSub');
+      const $link = document.getElementById('sheetLink');
+      const btns = Array.from(document.querySelectorAll('.tab-btn'));
+
+      function show(name) {
+        const cfg = PANELS[name];
+        if (!cfg) return;
+        btns.forEach((b) => b.classList.toggle('active', b.dataset.panel === name));
+        Object.keys(PANELS).forEach((p) => { document.getElementById('panel-' + p).hidden = p !== name; });
+        $sub.textContent = cfg.sub;
+        $link.href = 'https://docs.google.com/spreadsheets/d/' + cfg.sheet + '/edit';
+        $link.textContent = cfg.link;
+        $link.style.display = cfg.sheet ? '' : 'none';
+        document.dispatchEvent(new CustomEvent('tabshown', { detail: name }));
+      }
+
+      btns.forEach((b) => b.addEventListener('click', () => show(b.dataset.panel)));
+      show('subs');
+    })();
   </script>
 </body>
 </html>
