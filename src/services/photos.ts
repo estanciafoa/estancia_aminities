@@ -66,6 +66,16 @@ export async function importPhotosFromBase64(
 }
 
 /**
+ * Write a single face image (already base64) to disk as "<id>.jpg" — used by
+ * the per-face "faces folder" download path (fast, one small request per ID),
+ * which is preferred over the whole-ZIP download when available.
+ */
+export async function writePhotoBase64(id: string, base64: string): Promise<void> {
+  const dir = await ensurePhotosDir();
+  await writeAsStringAsync(`${dir}/${id.trim()}.jpg`, base64, { encoding: EncodingType.Base64 });
+}
+
+/**
  * Populate local_photo on each item from the extracted files, matching the
  * file stem (case-insensitive) against a key derived from each item.
  * Mirrors IDCHECKER's attachLocalPhotosById.
@@ -85,6 +95,22 @@ export async function attachLocalPhotos<T extends { local_photo?: string }>(
     const match = byStem.get((getKey(item) || '').trim().toLowerCase());
     return match ? { ...item, local_photo: `${dir}/${match}` } : item;
   });
+}
+
+/**
+ * Delete extracted photos for specific IDs — used for roster rows flagged 'd'
+ * (deleted), so a removed student's stale face doesn't linger on disk.
+ */
+export async function removePhotosById(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const dir = await ensurePhotosDir();
+  const names = await readDirectoryAsync(dir);
+  const want = new Set(ids.map((id) => id.trim().toLowerCase()));
+  for (const n of names) {
+    if (want.has(getFileStem(n).toLowerCase())) {
+      await deleteAsync(`${dir}/${n}`, { idempotent: true });
+    }
+  }
 }
 
 /** Delete all extracted face photos. */

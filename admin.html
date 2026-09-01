@@ -63,6 +63,18 @@
     }
     .config-warn code { background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 4px; }
 
+    /* ---- Bank report bar -------------------------------------------------- */
+    .bank-bar {
+      background: #fff; border: 1px solid var(--line); border-radius: 14px;
+      padding: 16px 18px; margin-bottom: 20px;
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    }
+    .bank-bar .bank-main { flex: 1 1 260px; }
+    .bank-bar strong { font-size: 15px; font-weight: 800; }
+    .bank-bar .bank-hint { display: block; font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.45; }
+    .bank-bar .bank-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .bank-bar .msg { flex-basis: 100%; padding: 0; }
+
     .dropzone {
       border: 2px dashed #CBD5E1; border-radius: 14px; background: #fff;
       padding: 32px 20px; text-align: center; cursor: pointer; transition: .15s;
@@ -185,6 +197,21 @@
     <div id="configWarn" class="config-warn" style="display:none">
       ⚠️ <code>ENDPOINT</code> is not set. Deploy <code>apps-script/subscription-writer.gs</code>
       and paste its <code>/exec</code> URL into the top of this file to enable pushing.
+    </div>
+
+    <div id="bankBar" class="bank-bar">
+      <div class="bank-main">
+        <strong>Bank report</strong>
+        <span class="bank-hint">Build the multi-tab bank workbook (Gas · Gym · Swim · Tennis · Combo) for one
+          month, straight from the live sheets. Gas rows come from that month's gas-reading tab.</span>
+      </div>
+      <div class="bank-controls">
+        <label class="tab-lbl">MONTH</label>
+        <select id="bankMonth" class="tab"></select>
+        <select id="bankYear" class="tab"></select>
+        <button id="bankDownload" class="push">⬇ Download Sheet for Bank</button>
+      </div>
+      <div id="bankMsg" class="msg"></div>
     </div>
 
     <div id="dropzone" class="dropzone">
@@ -633,16 +660,20 @@
       for (const f of list) addFile(f);
     }
 
-    // ---- Duplicate detection (key = APT NO + AMENITY USER + Month) ----------
-    // Identifies the same subscription (person + amenity + month) regardless of
-    // which statement it came from — the S.No. differs per statement, so it must
-    // NOT be part of the key or the same person re-appears from a second file.
+    // ---- Duplicate detection ------------------------------------------------
+    // A subscription is unique on APT NO. + NAME OF CLIENT + AMENITY USER + Month
+    // + Amount (per amenity tab). The S.No. differs per statement and the Payment
+    // Description is free text, so NEITHER is part of the key. This MUST stay
+    // identical to the server's normKey_ in subscription-writer.gs, or the sheet
+    // duplicate check never matches and every upload re-inserts the statement.
     // row = [S.No., APT NO., NAME OF CLIENT, AMENITY USER, Month, Amount, Desc]
     function rowKey(row) {
       return [
         String(row[1] == null ? '' : row[1]).trim().toLowerCase(), // APT NO.
+        String(row[2] == null ? '' : row[2]).trim().toLowerCase(), // NAME OF CLIENT
         String(row[3] == null ? '' : row[3]).trim().toLowerCase(), // AMENITY USER
         String(row[4] == null ? '' : row[4]).trim().toLowerCase(), // Month
+        String(row[5] == null ? '' : row[5]).trim().toLowerCase(), // Amount
       ].join('|');
     }
 
@@ -930,6 +961,143 @@
 
       btns.forEach((b) => b.addEventListener('click', () => show(b.dataset.panel)));
       show('subs');
+    })();
+  </script>
+
+  <script>
+    // ---- Download Sheet for Bank -------------------------------------------
+    // Assembles the multi-tab bank workbook for one month, live, from BOTH
+    // sheets: Gym/Swim/Tennis/Combo from the subscription sheet (via the
+    // uploader's ENDPOINT `get_rows`), and Gas from the gas sheet's monthly tab
+    // (via GAS_ENDPOINT `get_month_rows`). The output mirrors outputsampleforbank
+    // .xlsx: amenity tabs are `S.No. | APT NO. | NAME OF CLIENT | Amount |
+    // Payment Desription` (the AMENITY USER + Month columns dropped, S.No.
+    // renumbered); Gas is the same but its description spills into an unlabeled
+    // 6th column (" towards … kg Consumption …"), exactly as the bank expects.
+    (function () {
+      const $ = (id) => document.getElementById(id);
+      const monthSel = $('bankMonth'), yearSel = $('bankYear'), btn = $('bankDownload'), msgEl = $('bankMsg');
+      const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'];
+      const SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const AMENITY_HEADER = ['S.No.', 'APT NO.', 'NAME OF CLIENT', 'Amount', 'Payment Desription'];
+
+      // Month + year pickers, defaulting to the current month.
+      const now = new Date();
+      MONTH_NAMES.forEach((m, i) => monthSel.appendChild(new Option(m, String(i))));
+      for (let y = now.getFullYear() + 1; y >= now.getFullYear() - 3; y--) yearSel.appendChild(new Option(String(y), String(y)));
+      monthSel.value = String(now.getMonth());
+      yearSel.value = String(now.getFullYear());
+
+      function setMsg(t, cls) { msgEl.textContent = t; msgEl.className = 'msg ' + (cls || ''); }
+      function round2(n) { n = Number(n); return isNaN(n) ? n : Math.round(n * 100) / 100; }
+      function toNum(v) { const n = Number(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')); return isNaN(n) ? v : n; }
+
+      // Gas admin token — shared with the GAS READING tab (same localStorage key).
+      function gasToken() {
+        let t = localStorage.getItem('gasAdminToken') || '';
+        if (!t) { t = (prompt('Enter the gas admin write token') || '').trim(); if (t) localStorage.setItem('gasAdminToken', t); }
+        return t;
+      }
+
+      // One amenity tab: read the subscription sheet, keep only this month's rows,
+      // drop AMENITY USER + Month, renumber S.No. The billing month is read from
+      // each row's Payment Description (robust to Sheets date-coercing the Month
+      // cell), matching the picked "Jul 2026".
+      async function fetchAmenity(gid, wantMonth) {
+        const url = ENDPOINT + '?action=get_rows&token=' + encodeURIComponent(TOKEN)
+          + '&ssId=' + encodeURIComponent(SHEET_ID) + '&gid=' + encodeURIComponent(gid);
+        const res = await fetch(url, { redirect: 'follow' });
+        const data = JSON.parse(await res.text());
+        if (!data.ok) throw new Error(data.error || 'read failed');
+        const out = [];
+        let seq = 0;
+        (data.result.rows || []).forEach((r) => {
+          const desc = r['Payment Description'] != null ? String(r['Payment Description']) : '';
+          const m = extractMonth(desc) || extractMonth(String(r['Month'] == null ? '' : r['Month']));
+          if (m !== wantMonth) return;
+          seq++;
+          out.push([seq, r['APT NO.'] == null ? '' : r['APT NO.'],
+            r['NAME OF CLIENT'] == null ? '' : r['NAME OF CLIENT'], toNum(r['Amount']), desc]);
+        });
+        return out;
+      }
+
+      // The Gas tab: read the month's gas-reading tab and rebuild the bank
+      // description from apt / kg / gross ("Jul'26 - Gas Payment for Flat No. X"
+      // + " towards K kg Consumption ( Rs.G/kg inclusive of 5% GST )").
+      async function fetchGas(monthIdx, year) {
+        const token = gasToken();
+        if (!token) throw new Error('gas token is required');
+        const res = await fetch(GAS_ENDPOINT, {
+          method: 'POST', redirect: 'follow',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ action: 'get_month_rows', token, ssId: GAS_SHEET_ID, monthName: MONTH_NAMES[monthIdx] + ' ' + year }),
+        });
+        const data = JSON.parse(await res.text());
+        if (!data.ok) {
+          // A stale/wrong gas token is otherwise stuck in localStorage with no
+          // way back — drop it so the next attempt re-prompts (mirrors the GAS
+          // READING tab's "Change admin token"). The token is shared by both.
+          if (/token/i.test(data.error || '')) {
+            localStorage.removeItem('gasAdminToken');
+            throw new Error('Gas token rejected — cleared it; click download again to re-enter the correct token.');
+          }
+          throw new Error(data.error || 'gas read failed');
+        }
+        const gross = data.result.gross, short = SHORT[monthIdx], yy = String(year).slice(-2);
+        const out = [];
+        let seq = 0;
+        (data.result.rows || []).forEach((r) => {
+          seq++;
+          out.push([seq, r.apt, r.name, r.amount,
+            short + "'" + yy + " - Gas Payment for Flat No. " + r.apt,
+            " towards  " + round2(r.kg) + " kg Consumption ( Rs." + gross + "/kg inclusive of 5% GST )"]);
+        });
+        return { rows: out, missing: !!data.result.tabMissing };
+      }
+
+      function sheetFrom(rows) { return XLSX.utils.aoa_to_sheet([AMENITY_HEADER, ...rows]); }
+
+      async function download() {
+        const monthIdx = Number(monthSel.value), year = Number(yearSel.value);
+        const wantMonth = SHORT[monthIdx] + ' ' + year; // e.g. "Jul 2026"
+        const pretty = MONTH_NAMES[monthIdx] + ' ' + year;
+        btn.disabled = true;
+        const label = btn.textContent;
+        btn.textContent = 'BUILDING…';
+        setMsg('Reading live sheets for ' + pretty + '…', '');
+        try {
+          const [gas, gym, swim, tennis, combo] = await Promise.all([
+            fetchGas(monthIdx, year),
+            fetchAmenity(TABS.gym, wantMonth),
+            fetchAmenity(TABS.swimming, wantMonth),
+            fetchAmenity(TABS.tennis, wantMonth),
+            fetchAmenity(TABS.combo, wantMonth),
+          ]);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, sheetFrom(gas.rows), 'Gas');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(gym), 'Gym');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(swim), 'Swim');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(tennis), 'Tennis');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(combo), 'Combo');
+          const fname = 'Bank Report - ' + pretty + '.xlsx';
+          XLSX.writeFile(wb, fname);
+          const total = gas.rows.length + gym.length + swim.length + tennis.length + combo.length;
+          let note = '✓ ' + fname + ' — Gas ' + gas.rows.length + ' · Gym ' + gym.length
+            + ' · Swim ' + swim.length + ' · Tennis ' + tennis.length + ' · Combo ' + combo.length
+            + ' (' + total + ' rows).';
+          if (gas.missing) note += '  ⚠ No "' + pretty + '" gas tab — Gas is empty.';
+          setMsg(note, total ? 'ok' : 'warn');
+        } catch (e) {
+          setMsg('✗ ' + (e.message || e), 'err');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = label;
+        }
+      }
+
+      btn.addEventListener('click', download);
     })();
   </script>
 </body>

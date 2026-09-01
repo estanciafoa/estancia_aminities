@@ -28,8 +28,13 @@
  * Writes are IDEMPOTENT: we skip if a row for this payment id already exists, so
  * the callback and the webhook racing each other never double-credit.
  *
+ * ⚠️ DEPLOY THIS IN ITS OWN Apps Script project — NEVER in the same project as
+ * subscription-writer.gs. Both files define doGet/doPost; put together, one set
+ * of handlers shadows the other and each /exec URL silently starts serving the
+ * wrong app. Two web apps = two projects = two /exec URLs.
+ *
  * Deploy:
- *   1. New (or existing subscription-sheet-bound) Apps Script project.
+ *   1. A NEW, standalone Apps Script project (NOT the subscription-writer one).
  *   2. Paste this WHOLE file as Code.gs.
  *   3. Add the Razorpay keys in Project Settings ▸ Script Properties
  *      (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET). Prices are hardcoded in PACKAGES_.

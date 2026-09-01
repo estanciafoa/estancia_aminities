@@ -15,6 +15,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import DecisionOverlay from '@/components/decision-overlay';
+import Numpad, { FLAT_LENGTH } from '@/components/numpad';
 import { setPendingConfirmation } from '@/services/confirmation';
 import { enqueueLog } from '@/services/log-queue';
 import { decideEntry, type DecisionResult } from '@/services/subscription';
@@ -32,7 +33,6 @@ interface Props {
   enableHistory: boolean; // Family remembers; Guest does not
 }
 
-const FLAT_LENGTH = 4;
 type Step = 'flat' | 'people' | 'person';
 
 export default function AttendanceForm({ category, enableHistory }: Props) {
@@ -175,7 +175,7 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
       </View>
 
       {step === 'flat' && (
-        <Numpad flat={flat} onKey={pressKey} disabled={submitting} />
+        <Numpad value={flat} onKey={pressKey} disabled={submitting} />
       )}
 
       {step === 'people' && (
@@ -281,51 +281,6 @@ export default function AttendanceForm({ category, enableHistory }: Props) {
   );
 }
 
-// --- Full-screen number board ------------------------------------------------
-
-const ROWS = [
-  ['1', '2', '3'],
-  ['4', '5', '6'],
-  ['7', '8', '9'],
-  ['', '0', '⌫'],
-];
-
-function Numpad({ flat, onKey, disabled }: { flat: string; onKey: (k: string) => void; disabled: boolean }) {
-  const slots = Array.from({ length: FLAT_LENGTH }, (_, i) => flat[i] ?? '');
-  return (
-    <View style={styles.numpad}>
-      <View style={styles.display}>
-        {slots.map((d, i) => (
-          <View key={i} style={[styles.slot, d ? styles.slotFilled : null]}>
-            <Text style={styles.slotText}>{d || '·'}</Text>
-          </View>
-        ))}
-      </View>
-
-      <View style={styles.keysGrid}>
-        {ROWS.map((row, r) => (
-          <View key={r} style={styles.keyRow}>
-            {row.map((k, c) =>
-              k === '' ? (
-                <View key={c} style={styles.keySpacer} />
-              ) : (
-                <TouchableOpacity
-                  key={c}
-                  style={styles.key}
-                  activeOpacity={0.6}
-                  disabled={disabled}
-                  onPress={() => onKey(k)}>
-                  <Text style={[styles.keyText, k === '⌫' && styles.keyTextMuted]}>{k}</Text>
-                </TouchableOpacity>
-              ),
-            )}
-          </View>
-        ))}
-      </View>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF' },
   titleBar: {
@@ -338,42 +293,6 @@ const styles = StyleSheet.create({
   },
   backText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', width: 64 },
   titleText: { fontSize: 20, fontWeight: '900', color: '#FFFFFF', letterSpacing: 1 },
-
-  // Number board
-  numpad: { flex: 1, padding: 20 },
-  display: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 16,
-    paddingVertical: 24,
-    paddingHorizontal: 4,
-  },
-  slot: {
-    flex: 1,
-    maxWidth: 110,
-    height: 110,
-    borderRadius: 16,
-    borderWidth: 3,
-    borderColor: '#E2E8F0',
-    backgroundColor: '#F8FAFC',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  slotFilled: { borderColor: '#00A844', backgroundColor: '#FFFFFF' },
-  slotText: { fontSize: 64, fontWeight: '900', color: '#0F172A' },
-  keysGrid: { flex: 1 },
-  keyRow: { flex: 1, flexDirection: 'row' },
-  key: {
-    flex: 1,
-    margin: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderRadius: 18,
-    backgroundColor: '#F8FAFC',
-  },
-  keySpacer: { flex: 1, margin: 6 },
-  keyText: { fontSize: 76, fontWeight: '800', color: '#0F172A' },
-  keyTextMuted: { fontSize: 60, color: '#64748B' },
 
   // People list (Family)
   peopleBody: { padding: 24, paddingBottom: 48 },

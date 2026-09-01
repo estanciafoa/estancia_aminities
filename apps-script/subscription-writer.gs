@@ -5,6 +5,12 @@
  * inserts them at the TOP of the chosen amenity tab (gym/swimming/tennis/combo)
  * of the subscription spreadsheet.
  *
+ * ⚠️ DEPLOY THIS IN ITS OWN Apps Script project — NEVER in the same project as
+ * razorpay-payments.gs. Both files define doGet/doPost; put together, one set of
+ * handlers shadows the other and this /exec URL silently starts serving the wrong
+ * app (that outage: the subscription URL served the Razorpay "Pay" page). Two
+ * web apps = two projects = two /exec URLs.
+ *
  * Deploy:
  *   1. Open the target sheet (id 1OhbhJPxep0s5eQKmakgmSjJBIMDEzSN3iRXuGMaOCng)
  *      ▸ Extensions ▸ Apps Script  (or a standalone Apps Script project).
@@ -39,6 +45,9 @@ function doPost(e) {
     if (payload.action === 'insert_rows') {
       return insertSubscriptionRows_(payload);
     }
+    if (payload.action === 'dedupe_tab') {
+      return dedupeTab_(payload);
+    }
     return jsonResponse_(false, null, 'Unknown action: ' + payload.action);
   } catch (err) {
     return jsonResponse_(false, null, err && err.message ? err.message : String(err));
@@ -69,6 +78,57 @@ function insertSubscriptionRows_(payload) {
   return jsonResponse_(true, { inserted: rows.length, tab: sheet.getName() }, null);
 }
 
+// One-time cleanup: collapse rows that a re-uploaded statement duplicated. The
+// dedup key is APT NO. + NAME OF CLIENT + AMENITY USER + Month + Amount (cols
+// B..F), normalized — the same unique-subscription key as normKey_/rowKey. The
+// S.No. (col A) and Payment Description (col G) are NOT in the key, so two rows
+// that describe the same subscription (same person, month and amount) collapse
+// even if the description wording differs; rows differing in amount are KEPT.
+// Keeps the first (topmost = newest) occurrence, drops blank rows, and renumbers
+// S.No. 1..N. Pass dryRun:true to preview the counts without writing. (The real
+// fix for WHY duplicates piled up is the header-based existing_keys above —
+// redeploy this file so uploads dedup again.)
+function dedupeTab_(p) {
+  validateToken_(p.token);
+  if (!p.ssId) throw new Error('ssId is required');
+  var ss = SpreadsheetApp.openById(p.ssId);
+  var sheet = resolveSheet_(ss, p.gid);
+
+  var last = sheet.getLastRow();
+  if (last < 2) return jsonResponse_(true, { tab: sheet.getName(), total: 0, kept: 0, removed: 0 }, null);
+  var width = sheet.getLastColumn();
+  var all = sheet.getRange(1, 1, last, width).getValues();
+
+  var seen = {};
+  var kept = [];
+  var removed = 0;
+  for (var r = 1; r < all.length; r++) {
+    var row = all[r];
+    var blank = true;
+    for (var c = 1; c < row.length; c++) {
+      if (String(row[c] == null ? '' : row[c]).trim() !== '') { blank = false; break; }
+    }
+    if (blank) { removed++; continue; }
+    // Key = cols B..F (APT NO., NAME, AMENITY USER, Month, Amount) — S.No. (col A)
+    // and Payment Description (col G) excluded, matching normKey_/rowKey.
+    var parts = [];
+    for (var c = 1; c <= 5; c++) parts.push(String(row[c] == null ? '' : row[c]).trim().toLowerCase());
+    var key = parts.join('');
+    if (seen[key]) { removed++; continue; }
+    seen[key] = true;
+    kept.push(row);
+  }
+
+  if (p.dryRun) {
+    return jsonResponse_(true, { tab: sheet.getName(), total: last - 1, kept: kept.length, removed: removed, dryRun: true }, null);
+  }
+
+  for (var i = 0; i < kept.length; i++) kept[i][0] = i + 1; // renumber S.No.
+  sheet.getRange(2, 1, last - 1, width).clearContent();
+  if (kept.length) sheet.getRange(2, 1, kept.length, width).setValues(kept);
+  return jsonResponse_(true, { tab: sheet.getName(), total: last - 1, kept: kept.length, removed: removed }, null);
+}
+
 // Resolve a tab by gid (matching getSheetId()), falling back to the first sheet.
 function resolveSheet_(ss, gid) {
   if (gid) {
@@ -82,11 +142,12 @@ function resolveSheet_(ss, gid) {
   return ss.getSheets()[0];
 }
 
-// Return the existing rows' unique keys (APT NO + AMENITY USER + Month),
-// lowercased, so admin.html can drop duplicates before pushing. This identifies
-// the same subscription regardless of which statement it came from — the S.No.
-// differs per statement so it is deliberately NOT part of the key. Columns are
-// located by header name (tolerant), falling back to positions B/D.
+// Return the existing rows' unique keys (APT NO + NAME + AMENITY USER + Month +
+// Amount), lowercased, so admin.html can drop duplicates before pushing. This
+// identifies the same subscription regardless of which statement it came from —
+// the S.No. differs per statement and the Payment Description is free text, so
+// NEITHER is part of the key. Columns are located by header name (tolerant),
+// falling back to positions B/C/D/F. MUST match admin.html's rowKey exactly.
 function existingKeys_(p) {
   validateToken_(p.token);
   if (!p.ssId) throw new Error('ssId is required');
@@ -108,7 +169,9 @@ function existingKeys_(p) {
     return fallback;
   }
   var iApt = findCol(['apt no.', 'apt no', 'flat no.', 'flat no', 'flat', 'usn'], 1);
+  var iName = findCol(['name of client', 'name'], 2);
   var iUser = findCol(['amenity user', 'aminity user', 'amenity user name'], 3);
+  var iAmount = findCol(['amount', 'amt'], 5);
   // Derive the month from the Payment Description (verbatim text) — NOT the Month
   // cell, which Sheets coerces to a date and would never match the client's
   // parsed "Jul 2026". Same derivation the app and admin.html use.
@@ -118,7 +181,7 @@ function existingKeys_(p) {
   var keys = [];
   for (var r = 1; r < all.length; r++) {
     var month = monthFromText_(String(all[r][iDesc] || '')) || monthFromText_(String(all[r][iMonthCell] || ''));
-    keys.push(normKey_(all[r][iApt], all[r][iUser], month));
+    keys.push(normKey_(all[r][iApt], all[r][iName], all[r][iUser], month, all[r][iAmount]));
   }
   return jsonResponse_(true, { keys: keys }, null);
 }
@@ -171,11 +234,15 @@ function getRows_(p) {
   return jsonResponse_(true, { rows: rows }, null);
 }
 
-function normKey_(apt, user, month) {
+// Unique-subscription key: APT NO. + NAME OF CLIENT + AMENITY USER + Month +
+// Amount, normalized. Kept identical to admin.html's rowKey (client side).
+function normKey_(apt, name, user, month, amount) {
   return [
     String(apt == null ? '' : apt).trim().toLowerCase(),
+    String(name == null ? '' : name).trim().toLowerCase(),
     String(user == null ? '' : user).trim().toLowerCase(),
-    String(month == null ? '' : month).trim().toLowerCase()
+    String(month == null ? '' : month).trim().toLowerCase(),
+    String(amount == null ? '' : amount).trim().toLowerCase()
   ].join('|');
 }
 

@@ -20,6 +20,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import DecisionOverlay from '@/components/decision-overlay';
 import { setPendingConfirmation } from '@/services/confirmation';
 import { enqueueLog } from '@/services/log-queue';
+import { syncStudents } from '@/services/sheets';
 import { decideEntry, type DecisionResult } from '@/services/subscription';
 import {
   addCheckedIn,
@@ -27,6 +28,7 @@ import {
   getDeployedAmenity,
   getRosterById,
   hasStudentSubscription,
+  setLastSyncError,
   type RosterEntry,
 } from '@/services/storage';
 
@@ -50,6 +52,7 @@ export default function StudentScreen() {
   const [wedgeInput, setWedgeInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [syncingRoster, setSyncingRoster] = useState(false);
   const [overlay, setOverlay] = useState<DecisionResult | null>(null);
   const [manualFocused, setManualFocused] = useState(false);
 
@@ -199,6 +202,24 @@ export default function StudentScreen() {
     }
   };
 
+  // ID wasn't in the local roster — pull a fresh copy (data only, no photos)
+  // and retry the same lookup, in case the roster just hasn't synced yet.
+  const handleSyncStudents = async () => {
+    if (syncingRoster) return;
+    setSyncingRoster(true);
+    try {
+      await syncStudents({ photos: false });
+      await setLastSyncError(null);
+      await lookup(scannedId);
+    } catch (e: any) {
+      const msg = e?.message || 'Check your connection and try again.';
+      await setLastSyncError(msg);
+      Alert.alert('Sync failed', msg);
+    } finally {
+      setSyncingRoster(false);
+    }
+  };
+
   const goHome = () => {
     try {
       router.dismissAll();
@@ -227,7 +248,9 @@ export default function StudentScreen() {
                 <Text style={styles.facePhotoInitial}>?</Text>
               </View>
               <Text style={styles.resultName}>ID: {scannedId}</Text>
-              <Text style={styles.notFoundSub}>Not found in the student roster.</Text>
+              <Text style={styles.notFoundSub}>
+                Student ID not registered. Sync students info once and try again.
+              </Text>
             </>
           ) : student ? (
             <>
@@ -258,18 +281,28 @@ export default function StudentScreen() {
                   <Text style={styles.infoValue}>{student.validTill || '—'}</Text>
                 </View>
               </View>
+              {!hasSub && (
+                <Text style={styles.noSubText}>
+                  Student subscription is either not done or not synced.{'\n'}Make a manual entry in
+                  the note and proceed.
+                </Text>
+              )}
             </>
           ) : null}
         </View>
 
-        {student && hasSub ? (
+        {student ? (
           <TouchableOpacity style={styles.checkInBtn} onPress={handleCheckIn} disabled={submitting}>
             {submitting ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.checkInText}>CHECK IN</Text>}
           </TouchableOpacity>
-        ) : student ? (
-          <View style={styles.noSubBox}>
-            <Text style={styles.noSubText}>NO SUBSCRIPTION YET</Text>
-          </View>
+        ) : notFound ? (
+          <TouchableOpacity style={styles.syncBtn} onPress={handleSyncStudents} disabled={syncingRoster}>
+            {syncingRoster ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={styles.syncBtnText}>SYNC STUDENTS</Text>
+            )}
+          </TouchableOpacity>
         ) : null}
         <TouchableOpacity style={styles.cancelBtn} onPress={resetScan}>
           <Text style={styles.cancelText}>CANCEL / SCAN AGAIN</Text>
@@ -471,8 +504,17 @@ const styles = StyleSheet.create({
   infoSep: { width: 1, backgroundColor: '#334155' },
   checkInBtn: { height: 100, backgroundColor: '#00A844', justifyContent: 'center', alignItems: 'center' },
   checkInText: { color: '#FFFFFF', fontSize: 30, fontWeight: '900', letterSpacing: 2 },
-  noSubBox: { height: 100, backgroundColor: '#FEF3C7', justifyContent: 'center', alignItems: 'center' },
-  noSubText: { color: '#B45309', fontSize: 24, fontWeight: '900', letterSpacing: 2 },
+  noSubText: {
+    color: '#B45309',
+    fontSize: 15,
+    fontWeight: '700',
+    textAlign: 'center',
+    lineHeight: 22,
+    marginTop: 16,
+    paddingHorizontal: 8,
+  },
+  syncBtn: { height: 100, backgroundColor: '#7C3AED', justifyContent: 'center', alignItems: 'center' },
+  syncBtnText: { color: '#FFFFFF', fontSize: 24, fontWeight: '900', letterSpacing: 2 },
   cancelBtn: { height: 56, justifyContent: 'center', alignItems: 'center' },
   cancelText: { color: '#64748B', fontSize: 14, fontWeight: '800', letterSpacing: 1 },
 });

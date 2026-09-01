@@ -1,41 +1,62 @@
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Keyboard,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import Numpad, { FLAT_LENGTH } from '@/components/numpad';
 import { setPendingConfirmation } from '@/services/confirmation';
 import { enqueueLog } from '@/services/log-queue';
 import { getCheckedInByFlat, removeCheckedIn, type CheckedInEntry } from '@/services/storage';
 
+type Step = 'flat' | 'people';
+
 export default function CheckOutScreen() {
   const router = useRouter();
+  const [step, setStep] = useState<Step>('flat');
   const [flat, setFlat] = useState('');
-  const [people, setPeople] = useState<CheckedInEntry[] | null>(null);
+  const [people, setPeople] = useState<CheckedInEntry[]>([]);
   const [searching, setSearching] = useState(false);
   const [checkingOut, setCheckingOut] = useState<string | null>(null);
+  const advancing = useRef(false);
 
-  const handleFind = async () => {
-    if (!flat.trim()) return Alert.alert('Missing flat', 'Enter the flat number.');
-    Keyboard.dismiss();
+  // Auto-advance once a full flat number has been keyed in — same as CHECK IN.
+  useEffect(() => {
+    if (step !== 'flat' || flat.length !== FLAT_LENGTH) return;
+    void findPeople();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flat, step]);
+
+  const pressKey = (k: string) => {
+    if (k === '⌫') {
+      setFlat((f) => f.slice(0, -1));
+      return;
+    }
+    setFlat((f) => (f.length >= FLAT_LENGTH ? f : f + k));
+  };
+
+  const findPeople = async () => {
+    if (advancing.current) return;
+    advancing.current = true;
     setSearching(true);
     try {
       const list = await getCheckedInByFlat(flat);
       setPeople(list);
+      setStep('people');
     } finally {
       setSearching(false);
+      advancing.current = false;
     }
+  };
+
+  const backToFlat = () => {
+    setStep('flat');
+    setFlat('');
+    setPeople([]);
+  };
+
+  const onBack = () => {
+    if (step === 'flat') router.back();
+    else backToFlat();
   };
 
   const handleCheckOut = async (entry: CheckedInEntry) => {
@@ -70,66 +91,51 @@ export default function CheckOutScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.titleBar}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={12}>
+        <TouchableOpacity onPress={onBack} hitSlop={12}>
           <Text style={styles.backText}>‹ BACK</Text>
         </TouchableOpacity>
-        <Text style={styles.titleText}>CHECK OUT</Text>
-        <View style={{ width: 56 }} />
+        <Text style={styles.titleText}>CHECK OUT{step === 'flat' ? '' : `  ·  ${flat}`}</Text>
+        <View style={{ width: 64 }} />
       </View>
 
-      <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <Text style={styles.label}>FLAT NUMBER</Text>
-          <View style={styles.row}>
-            <TextInput
-              style={styles.input}
-              value={flat}
-              onChangeText={setFlat}
-              placeholder="e.g. 1201"
-              placeholderTextColor="#94A3B8"
-              keyboardType="number-pad"
-              returnKeyType="search"
-              onSubmitEditing={handleFind}
-              onBlur={() => Keyboard.dismiss()}
-            />
-            <TouchableOpacity style={styles.findBtn} onPress={handleFind} disabled={searching}>
-              {searching ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.findText}>FIND</Text>}
-            </TouchableOpacity>
-          </View>
+      {step === 'flat' && <Numpad value={flat} onKey={pressKey} disabled={searching} accent="#DC2626" />}
 
-          {people !== null && (
-            <View style={styles.listSection}>
-              <Text style={styles.listHeader}>CURRENTLY CHECKED IN</Text>
-              {people.length === 0 ? (
-                <Text style={styles.emptyText}>No one from this flat is currently checked in.</Text>
-              ) : (
-                people.map((p) => (
-                  <View key={p.key} style={styles.personRow}>
-                    <View style={styles.personInfo}>
-                      <Text style={styles.personName}>{p.name || p.student_id || '—'}</Text>
-                      <Text style={styles.personMeta}>
-                        {p.category}
-                        {p.student_id ? ` · ${p.student_id}` : ''}
-                        {p.gender ? ` · ${p.gender === 'F' ? 'F' : 'M'}` : ''}
-                      </Text>
-                    </View>
-                    <TouchableOpacity
-                      style={styles.outBtn}
-                      onPress={() => handleCheckOut(p)}
-                      disabled={!!checkingOut}>
-                      {checkingOut === p.key ? (
-                        <ActivityIndicator color="#FFFFFF" />
-                      ) : (
-                        <Text style={styles.outText}>CHECK OUT</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                ))
-              )}
+      {step === 'people' && (
+        <ScrollView contentContainerStyle={styles.peopleBody}>
+          <Text style={styles.flatHeadline}>FLAT {flat}</Text>
+          {people.length > 0 ? (
+            <Text style={styles.peopleHint}>TAP CHECK OUT</Text>
+          ) : (
+            <Text style={styles.peopleHint}>NO ONE FROM THIS FLAT IS CHECKED IN</Text>
+          )}
+
+          {people.map((p) => (
+            <View key={p.key} style={styles.personRow}>
+              <View style={styles.personInfo}>
+                <Text style={styles.personName}>{p.name || p.student_id || '—'}</Text>
+                <Text style={styles.personMeta}>
+                  {p.category}
+                  {p.student_id ? ` · ${p.student_id}` : ''}
+                  {p.gender ? ` · ${p.gender === 'F' ? 'F' : 'M'}` : ''}
+                </Text>
+              </View>
+              <TouchableOpacity style={styles.outBtn} onPress={() => handleCheckOut(p)} disabled={!!checkingOut}>
+                {checkingOut === p.key ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.outText}>CHECK OUT</Text>
+                )}
+              </TouchableOpacity>
             </View>
+          ))}
+
+          {people.length === 0 && (
+            <TouchableOpacity style={styles.addNewBtn} activeOpacity={0.85} onPress={backToFlat}>
+              <Text style={styles.addNewText}>‹ TRY ANOTHER FLAT</Text>
+            </TouchableOpacity>
           )}
         </ScrollView>
-      </KeyboardAvoidingView>
+      )}
     </SafeAreaView>
   );
 }
@@ -144,40 +150,56 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  backText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', width: 56 },
-  titleText: { fontSize: 20, fontWeight: '900', color: '#FFFFFF', letterSpacing: 2 },
-  body: { padding: 24 },
-  label: { fontSize: 12, fontWeight: '800', color: '#64748B', letterSpacing: 2, marginBottom: 8 },
-  row: { flexDirection: 'row', gap: 8 },
-  input: {
-    flex: 1,
-    height: 56,
-    borderWidth: 2,
-    borderColor: '#E2E8F0',
-    paddingHorizontal: 16,
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#0F172A',
-    backgroundColor: '#FFFFFF',
+  backText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800', width: 64 },
+  titleText: { fontSize: 20, fontWeight: '900', color: '#FFFFFF', letterSpacing: 1 },
+
+  // People list — matches the CHECK IN (Family) list sizing.
+  peopleBody: { padding: 24, paddingBottom: 48 },
+  flatHeadline: { fontSize: 34, fontWeight: '900', color: '#0F172A', letterSpacing: 2, textAlign: 'center' },
+  peopleHint: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 2,
+    textAlign: 'center',
+    marginTop: 8,
+    marginBottom: 20,
   },
-  findBtn: { width: 96, height: 56, backgroundColor: '#DC2626', justifyContent: 'center', alignItems: 'center' },
-  findText: { color: '#FFFFFF', fontWeight: '900', fontSize: 14 },
-  listSection: { marginTop: 28 },
-  listHeader: { fontSize: 12, fontWeight: '800', color: '#64748B', letterSpacing: 2, marginBottom: 12 },
-  emptyText: { fontSize: 15, fontWeight: '600', color: '#94A3B8' },
   personRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
+    minHeight: 92,
+    paddingHorizontal: 24,
+    borderRadius: 16,
     borderWidth: 2,
     borderColor: '#E2E8F0',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    marginBottom: 12,
+    backgroundColor: '#FFFFFF',
+    marginBottom: 14,
   },
-  personInfo: { flex: 1 },
-  personName: { fontSize: 18, fontWeight: '800', color: '#0F172A' },
-  personMeta: { fontSize: 12, fontWeight: '700', color: '#64748B', marginTop: 2 },
-  outBtn: { backgroundColor: '#DC2626', paddingHorizontal: 18, paddingVertical: 14, borderRadius: 10, minWidth: 120, alignItems: 'center' },
-  outText: { color: '#FFFFFF', fontWeight: '900', fontSize: 14, letterSpacing: 1 },
+  personInfo: { flex: 1, paddingRight: 12 },
+  personName: { fontSize: 30, fontWeight: '800', color: '#0F172A' },
+  personMeta: { fontSize: 14, fontWeight: '700', color: '#64748B', marginTop: 4, letterSpacing: 1 },
+  outBtn: {
+    minHeight: 68,
+    paddingHorizontal: 22,
+    borderRadius: 14,
+    backgroundColor: '#DC2626',
+    justifyContent: 'center',
+    alignItems: 'center',
+    minWidth: 150,
+  },
+  outText: { color: '#FFFFFF', fontWeight: '900', fontSize: 20, letterSpacing: 1 },
+  addNewBtn: {
+    minHeight: 92,
+    borderRadius: 16,
+    borderWidth: 3,
+    borderColor: '#DC2626',
+    borderStyle: 'dashed',
+    backgroundColor: '#FEF2F2',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  addNewText: { fontSize: 24, fontWeight: '900', color: '#DC2626', letterSpacing: 1 },
 });

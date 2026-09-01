@@ -1,10 +1,12 @@
-import { attachLocalPhotos, importPhotosFromBase64 } from './photos';
+import { attachLocalPhotos, importPhotosFromBase64, removePhotosById, writePhotoBase64 } from './photos';
 import {
   getLastSyncTime,
+  getRoster,
   monthMatchesCurrent,
   saveFamilyRoster,
   saveLocalStudents,
   saveRoster,
+  setLastSyncError,
   setLastSyncTime,
   type RosterEntry,
   type Student,
@@ -16,9 +18,6 @@ const APPS_SCRIPT_URL =
   'https://script.google.com/macros/s/AKfycby2yjp7UEvBdYIDzKjOyFInegp_9CA7LVhpmbHbqwnxdPYEI5WJE8BYki-3Dwrgfm7pkw/exec';
 const SHEET_TOKEN = 'Admin2026';
 const ROSTER_GID = '0'; // "Student id" tab (Student ID → Name/Flat), photos by ID
-// Optional "Family Members" tab (columns: Flat, Name, Gender) — pre-seeds the
-// family autofill list. Leave '' until the tab exists; sync skips it when empty.
-const FAMILY_GID = '';
 
 // Subscription source: the amenities-payment sheet populated by admin.html, read
 // via the subscription-writer Apps Script (`get_rows` action, ssId passed
@@ -41,6 +40,9 @@ const LOG_SS_ID = '1FDIJ5xJWDG6BTwf_jwn8QQIurZY7x2NI4xpxFEbM_80';
 const LOG_GID = '1191732374';
 
 export type Direction = 'IN' | 'OUT';
+
+/** Progress reporter for syncStudents — the admin screen uses it to show live status. */
+export type OnProgress = (msg: string) => void;
 
 export interface AttendanceLogRow {
   category: 'Family' | 'Student' | 'Guest';
@@ -97,18 +99,14 @@ export interface LogRow {
   amenity: string;
 }
 
-/** Read the full attendance log via the read proxy (for report export). */
-export async function fetchLogRows(): Promise<LogRow[]> {
-  const url =
-    `${APPS_SCRIPT_URL}?action=get_csv` +
-    `&ssId=${encodeURIComponent(LOG_SS_ID)}` +
-    `&gid=${encodeURIComponent(LOG_GID)}` +
-    `&token=${encodeURIComponent(SHEET_TOKEN)}`;
-  const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) throw new Error('Log fetch failed: ' + res.status);
-  const raw = await res.text();
-  const rows = parseCSV(raw);
-  return rows.map((r) => ({
+// Once the live log tab crosses ~20k rows, log-writer.gs moves the oldest
+// rows into this same-spreadsheet tab (see apps-script/log-writer.gs) to keep
+// the live tab (and every get_csv read of it) fast. Kept in sync with that
+// file's LOG_ARCHIVE_TAB_NAME constant.
+const LOG_ARCHIVE_TAB_NAME = 'Attendance Log Archive';
+
+function mapLogRow(r: Record<string, string>): LogRow {
+  return {
     timestamp: getCol(r, 'Timestamp'),
     category: getCol(r, 'Category'),
     flat: getCol(r, 'Flat No', 'Flat'),
@@ -118,7 +116,79 @@ export async function fetchLogRows(): Promise<LogRow[]> {
     direction: getCol(r, 'Direction'),
     subscription: getCol(r, 'Subscription'),
     amenity: getCol(r, 'Amenity'),
-  }));
+  };
+}
+
+async function fetchLogCsv(tabParam: string): Promise<Record<string, string>[]> {
+  const url =
+    `${APPS_SCRIPT_URL}?action=get_csv` +
+    `&ssId=${encodeURIComponent(LOG_SS_ID)}` +
+    `&${tabParam}` +
+    `&token=${encodeURIComponent(SHEET_TOKEN)}`;
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error('Log fetch failed: ' + res.status);
+  const raw = await res.text();
+  if (raw.trimStart().startsWith('{')) {
+    const err = JSON.parse(raw);
+    if (err && err.ok === false) throw new Error(err.error || 'Log fetch denied');
+  }
+  return parseCSV(raw);
+}
+
+/**
+ * Read the full attendance log via the read proxy (for report export) —
+ * merges the live tab with the archive tab (oldest rows first), so archiving
+ * never makes older reports lose data. The archive tab won't exist until the
+ * live tab has crossed the threshold once, so its read is best-effort.
+ */
+export async function fetchLogRows(): Promise<LogRow[]> {
+  const [archiveRows, liveRows] = await Promise.all([
+    fetchLogCsv(`sheet=${encodeURIComponent(LOG_ARCHIVE_TAB_NAME)}`).catch(() => []),
+    fetchLogCsv(`gid=${encodeURIComponent(LOG_GID)}`),
+  ]);
+  return [...archiveRows, ...liveRows].map(mapLogRow);
+}
+
+// How many months back to look when building the family-member name list from
+// actual check-in history — deep enough to survive a reinstall (which wipes
+// the device-local remembered-names history) without dragging in names from a
+// year ago.
+
+/**
+ * Build a per-flat family-member name list straight from the attendance log:
+ * read the whole log, filter to Category=Family rows, group by Flat No, take
+ * the unique Names per flat. Rather than from who paid the subscription (the
+ * payer isn't necessarily who checks in). This is what seeds the Family
+ * check-in "tap a resident" list on a freshly-installed device, since the
+ * device-local remembered-names history (rememberFamilyMember) is wiped by
+ * every reinstall. Gender comes from the log itself (captured at check-in).
+ */
+async function fetchFamilyMembersFromLog(
+  onProgress?: OnProgress,
+): Promise<{ flat: string; name: string; gender: string }[]> {
+  onProgress?.('Reading attendance log for family check-in history…');
+  const rows = await fetchLogRows();
+  onProgress?.(`Attendance log: ${rows.length} rows read`);
+
+  const byFlat = new Map<string, Map<string, { name: string; gender: string }>>();
+  for (const r of rows) {
+    if (r.category !== 'Family' || !r.flat || !r.name) continue;
+    const fkey = r.flat.trim().toLowerCase();
+    let bucket = byFlat.get(fkey);
+    if (!bucket) byFlat.set(fkey, (bucket = new Map()));
+    const nkey = r.name.trim().toLowerCase();
+    const gender = r.gender === 'F' || r.gender === 'M' ? r.gender : '';
+    const existing = bucket.get(nkey);
+    if (!existing || (!existing.gender && gender)) {
+      bucket.set(nkey, { name: r.name.trim(), gender });
+    }
+  }
+
+  const familyMembers: { flat: string; name: string; gender: string }[] = [];
+  for (const [flat, names] of byFlat) {
+    for (const m of names.values()) familyMembers.push({ flat, name: m.name, gender: m.gender });
+  }
+  return familyMembers;
 }
 
 // --- CSV parsing (reused verbatim from IDCHECKER) ---
@@ -186,6 +256,85 @@ async function fetchFacesZipBase64(): Promise<string> {
     }
   }
   return raw;
+}
+
+/**
+ * Locate the "faces" Drive folder living beside the photos ZIP (ported from
+ * IDCHECKER's getFacesFolderId) — when it exists, individual faces can be
+ * pulled by name (one small ~30KB request each) instead of downloading the
+ * whole multi-MB ZIP just to extract a handful of changed photos.
+ */
+async function getFacesFolderId(): Promise<string | null> {
+  try {
+    const res = await fetch(`${APPS_SCRIPT_URL}?action=get_faces`, { redirect: 'follow' });
+    if (!res.ok) return null;
+    const data = JSON.parse(await res.text());
+    if (data?.ok && data.result?.found && data.result.folderId) return data.result.folderId as string;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+const FACE_DOWNLOAD_CONCURRENCY = 6;
+const MAX_FACE_RETRIES = 3;
+
+/** Run `worker` over `items` with at most `concurrency` in flight at once. */
+async function runPool<T>(items: T[], worker: (item: T) => Promise<void>, concurrency: number): Promise<void> {
+  let next = 0;
+  const n = Math.max(1, Math.min(concurrency, items.length || 1));
+  const runOne = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await worker(item);
+    }
+  };
+  await Promise.all(Array.from({ length: n }, runOne));
+}
+
+/** Fetch one face image by name (with retry/backoff on transient failures). */
+async function fetchFaceBase64(folderId: string, name: string): Promise<string | null> {
+  const url = `${APPS_SCRIPT_URL}?action=get_face&folderId=${encodeURIComponent(folderId)}&name=${encodeURIComponent(name)}`;
+  for (let attempt = 0; attempt < MAX_FACE_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, { redirect: 'follow' });
+      if (res.ok) {
+        const base64 = await res.text();
+        // The proxy returns raw base64 on success; a JSON body means a
+        // definitive "not found"/error — don't retry that.
+        if (!base64 || base64.trimStart().startsWith('{')) return null;
+        return base64;
+      }
+      if (res.status !== 429 && (res.status < 500 || res.status > 599)) return null;
+    } catch {
+      /* network error — fall through to backoff and retry */
+    }
+    if (attempt < MAX_FACE_RETRIES - 1) {
+      await new Promise((r) => setTimeout(r, 400 * 2 ** attempt + Math.random() * 300));
+    }
+  }
+  return null;
+}
+
+/** Pull exactly the wanted IDs' faces from the Drive folder, concurrently. */
+async function pullFacesFromFolder(folderId: string, ids: string[], onProgress?: OnProgress): Promise<number> {
+  let downloaded = 0;
+  let done = 0;
+  const total = ids.length;
+  await runPool(
+    ids,
+    async (id) => {
+      const base64 = await fetchFaceBase64(folderId, `${id}.jpg`);
+      if (base64) {
+        await writePhotoBase64(id, base64);
+        downloaded++;
+      }
+      done++;
+      onProgress?.(`Photos: ${done}/${total} synced`);
+    },
+    FACE_DOWNLOAD_CONCURRENCY,
+  );
+  return downloaded;
 }
 
 /** Fetch any tab's CSV (by gid) through the Apps Script proxy. */
@@ -290,11 +439,22 @@ function amenitiesFromText(text: string): string[] {
  * per-person name) + the month. The MONTH cell is stored as a date by Sheets,
  * so the month is derived from the "Payment Desription" text instead.
  */
-async function fetchSubscriptionStudents(): Promise<Student[]> {
+async function fetchSubscriptionStudents(onProgress?: OnProgress): Promise<Student[]> {
   const students: Student[] = [];
-  for (const gid of Object.keys(AMENITY_TABS)) {
+  // The 4 amenity tabs are independent reads — fetch them concurrently rather
+  // than one Apps Script round-trip at a time (each has real latency).
+  const gids = Object.keys(AMENITY_TABS);
+  onProgress?.(`Reading subscription sheet: ${gids.map((g) => AMENITY_TABS[g]).join(', ')} tabs…`);
+  const tabRows = await Promise.all(
+    gids.map(async (gid) => {
+      const rows = await fetchSubRowsByGid(gid);
+      onProgress?.(`${AMENITY_TABS[gid]} tab: ${rows.length} rows read`);
+      return rows;
+    }),
+  );
+  gids.forEach((gid, i) => {
     const tabAmenity = AMENITY_TABS[gid];
-    const rows = await fetchSubRowsByGid(gid);
+    const rows = tabRows[i];
     for (const row of rows) {
       const flat = getCol(row, 'APT NO.', 'APT NO', 'FLAT NO.', 'FLAT NO', 'FLAT');
       if (!flat) continue;
@@ -318,8 +478,52 @@ async function fetchSubscriptionStudents(): Promise<Student[]> {
         students.push({ flat, name, month, status: 'Paid', type: '', amenity });
       }
     }
-  }
+  });
   return students;
+}
+
+/**
+ * Classify roster rows by their Update/Status flag column — ported from
+ * IDCHECKER's flag-driven photo sync (dataSync.ts processRows). A full ZIP
+ * download + extract is expensive (~36 MB), so only rows that actually need a
+ * face are pulled: brand-new IDs (never seen locally) and rows flagged 'n'
+ * (new) or 'u'/'up' (update). Rows flagged 'd' (delete) are dropped from the
+ * roster entirely and their local photo is removed. Unflagged, already-known
+ * rows still get their metadata (name/flat/validTill) refreshed from the
+ * sheet — only the photo pull is skipped for them.
+ */
+function classifyRosterRows(
+  rows: Record<string, string>[],
+  existingIds: Set<string>,
+): { roster: RosterEntry[]; pullPhotoIds: string[]; deletedIds: string[] } {
+  const roster: RosterEntry[] = [];
+  const pullPhotoIds: string[] = [];
+  const deletedIds: string[] = [];
+
+  for (const row of rows) {
+    const id = getCol(row, 'ID', 'Id', 'Student ID', 'StudentID');
+    if (!id) continue;
+    const flag = getCol(row, 'Update', 'update', 'Status', 'status').toLowerCase();
+
+    if (flag === 'd') {
+      deletedIds.push(id);
+      continue;
+    }
+
+    roster.push({
+      id,
+      name: getCol(row, 'Name'),
+      flat: getCol(row, 'Flat', 'Flat No', 'Flat Number', 'flat number'),
+      validTill: getCol(row, 'ValidTill', 'Valid Till', 'Valid To'),
+    });
+
+    const isNew = !existingIds.has(id.trim().toLowerCase());
+    if (isNew || flag === 'n' || flag === 'u' || flag === 'up') {
+      pullPhotoIds.push(id);
+    }
+  }
+
+  return { roster, pullPhotoIds, deletedIds };
 }
 
 /**
@@ -329,59 +533,109 @@ async function fetchSubscriptionStudents(): Promise<Student[]> {
  * combo row is expanded into gym + swimming records. Roster + face photos still
  * come from the original read proxy.
  *
- * @param opts.photos when true (default), also download the faces ZIP from
- *   Drive and extract photos. Pass { photos: false } to sync ONLY the
- *   subscription data quickly (skips the ~36 MB ZIP). Already-downloaded
- *   photos are still re-attached either way.
+ * @param opts.photos when true (default), also download student photos.
+ *   Pass { photos: false } to sync ONLY the subscription data quickly.
+ *   Already-downloaded photos are still re-attached either way.
+ * @param opts.onProgress optional live status reporter — called with a short
+ *   message at each step (which sheet is being read, row counts, photo
+ *   download progress) so the UI can show what's happening.
+ * @param opts.forceAllPhotos when true, pull EVERY roster ID's photo — not
+ *   just new/flagged ones. A one-time bulk re-sync (e.g. after clearing app
+ *   data, moving to a new device, or backfilling photos for rows that were
+ *   never flagged). Implies opts.photos, and explicitly uses the full ZIP
+ *   instead of the per-face Drive folder.
  * @returns the number of subscription records stored.
  */
-export async function syncStudents(opts: { photos?: boolean } = {}): Promise<number> {
-  const includePhotos = opts.photos ?? true;
+export async function syncStudents(
+  opts: { photos?: boolean; onProgress?: OnProgress; forceAllPhotos?: boolean } = {},
+): Promise<number> {
+  const includePhotos = opts.forceAllPhotos || (opts.photos ?? true);
+  const onProgress = opts.onProgress;
 
   // 1) Subscription details (APT NO. → amenity) — the gating data.
-  const students = await fetchSubscriptionStudents();
-
   // 2) Student roster (Student ID → Name/Flat) — for ID-based student lookup.
-  const rosterRows = await fetchCsvByGid(ROSTER_GID);
-  let roster: RosterEntry[] = [];
-  for (const row of rosterRows) {
-    const id = getCol(row, 'ID', 'Id', 'Student ID', 'StudentID');
-    if (!id) continue;
-    roster.push({
-      id,
-      name: getCol(row, 'Name'),
-      flat: getCol(row, 'Flat', 'Flat No', 'Flat Number', 'flat number'),
-      validTill: getCol(row, 'ValidTill', 'Valid Till', 'Valid To'),
-    });
+  // Independent reads — run concurrently instead of one Apps Script
+  // round-trip after another.
+  onProgress?.('Reading student roster: "Student id" tab…');
+  const [students, rosterRows, logFamilyMembers] = await Promise.all([
+    fetchSubscriptionStudents(onProgress),
+    fetchCsvByGid(ROSTER_GID).then((rows) => {
+      onProgress?.(`Student roster: ${rows.length} rows read`);
+      return rows;
+    }),
+    fetchFamilyMembersFromLog(onProgress).catch((e) => {
+      console.warn('Family check-in history fetch failed (leaving the family autofill list untouched):', e);
+      return null;
+    }),
+  ]);
+  const existingIds = new Set((await getRoster()).map((r) => r.id.trim().toLowerCase()));
+  const { roster: newRoster, pullPhotoIds: flaggedPhotoIds, deletedIds } = classifyRosterRows(rosterRows, existingIds);
+  let roster: RosterEntry[] = newRoster;
+  // Normally only new/flagged IDs need a photo; forceAllPhotos bypasses that
+  // and re-pulls every current roster ID's photo once.
+  const pullPhotoIds = opts.forceAllPhotos ? roster.map((r) => r.id) : flaggedPhotoIds;
+  onProgress?.(
+    opts.forceAllPhotos
+      ? `${roster.length} students in roster — re-syncing ALL photos, ${deletedIds.length} removed`
+      : `${roster.length} students in roster — ${pullPhotoIds.length} need a photo, ${deletedIds.length} removed`,
+  );
+
+  // Family check-in autofill list: seeded from actual check-in history in the
+  // attendance log (who has really been logged in as Family for each flat),
+  // NOT from subscription payer names — the person who paid isn't necessarily
+  // who checks in. This is what survives a reinstall, since the device-local
+  // remembered-names history (rememberFamilyMember) is wiped every install.
+  // Best-effort: if the log read itself failed, the previously-saved family
+  // roster is left untouched rather than being wiped with an empty list.
+  if (logFamilyMembers !== null) {
+    onProgress?.(`Family check-in list: ${logFamilyMembers.length} names across all flats`);
+    await saveFamilyRoster(logFamilyMembers);
   }
 
-  // 3) Optional Family Members tab (Flat, Name, Gender) — pre-seeds the family
-  //    autofill list. Best-effort: a missing tab/gid must not abort the sync.
-  if (FAMILY_GID) {
+  // Optionally pull photos for the IDs that actually changed (new, or flagged
+  // 'n'/'u'/'up') — skip photo work entirely when nothing needs one. Normal
+  // syncs prefer the Drive "faces" folder: each wanted face is ~30 KB fetched
+  // by name (concurrency 6), vs. downloading the whole multi-MB ZIP just to
+  // extract a handful of files. Only fall back to the full ZIP if no faces
+  // folder exists. The one-time bulk re-sync explicitly goes straight to the
+  // full ZIP so every roster ID is refreshed from the canonical archive.
+  // Photos are best-effort: a failure here must not abort the sync.
+  if (includePhotos && pullPhotoIds.length > 0) {
     try {
-      const famRows = await fetchCsvByGid(FAMILY_GID);
-      const fam: { flat: string; name: string; gender: string }[] = [];
-      for (const row of famRows) {
-        const flat = getCol(row, 'Flat', 'Flat No', 'Flat Number', 'flat number');
-        const name = getCol(row, 'Name');
-        if (!flat || !name) continue;
-        const g = getCol(row, 'Gender', 'Sex').trim().toUpperCase();
-        fam.push({ flat, name, gender: g.startsWith('F') ? 'F' : g.startsWith('M') ? 'M' : '' });
+      if (opts.forceAllPhotos) {
+        onProgress?.('Downloading the full photos ZIP…');
+        const zipBase64 = await fetchFacesZipBase64();
+        onProgress?.(`Extracting ${pullPhotoIds.length} photo(s) from the ZIP…`);
+        await importPhotosFromBase64(zipBase64, pullPhotoIds);
+      } else {
+        onProgress?.('Looking for the Drive "faces" folder…');
+        const folderId = await getFacesFolderId();
+        if (folderId) {
+          onProgress?.(`Downloading ${pullPhotoIds.length} student photo(s)…`);
+          await pullFacesFromFolder(folderId, pullPhotoIds, onProgress);
+        } else {
+          onProgress?.('No faces folder — downloading the full photos ZIP…');
+          const zipBase64 = await fetchFacesZipBase64();
+          onProgress?.(`Extracting ${pullPhotoIds.length} photo(s) from the ZIP…`);
+          await importPhotosFromBase64(zipBase64, pullPhotoIds);
+        }
       }
-      await saveFamilyRoster(fam);
-    } catch (e) {
-      console.warn('Family roster sync failed (continuing):', e);
-    }
-  }
-
-  // Optionally pull the face photos ZIP from Drive and extract by student ID.
-  // Photos are best-effort: a ZIP failure must not abort the data sync.
-  if (includePhotos) {
-    try {
-      const zipBase64 = await fetchFacesZipBase64();
-      await importPhotosFromBase64(zipBase64, roster.map((r) => r.id));
     } catch (e) {
       console.warn('Face photo sync failed (continuing without photos):', e);
+      onProgress?.('Photo sync failed — continuing without photos');
+    }
+  } else if (includePhotos) {
+    onProgress?.('No new/updated student photos to sync');
+  }
+
+  // Rows flagged 'd' are dropped from the roster above — also clean up their
+  // extracted photo so a deleted student's face doesn't linger on disk.
+  if (deletedIds.length > 0) {
+    try {
+      onProgress?.(`Removing ${deletedIds.length} deleted student photo(s)…`);
+      await removePhotosById(deletedIds);
+    } catch (e) {
+      console.warn('Photo cleanup for deleted students failed (continuing):', e);
     }
   }
 
@@ -395,6 +649,7 @@ export async function syncStudents(opts: { photos?: boolean } = {}): Promise<num
 
   // Return the stored (deduped) count, not the raw row count, so the number
   // shown right after sync matches what's persisted and re-shown on re-entry.
+  onProgress?.('Saving…');
   const storedCount = await saveLocalStudents(students);
   await saveRoster(roster);
   await setLastSyncTime(new Date().toISOString());
@@ -417,8 +672,13 @@ export async function autoSyncIfDue(maxAgeMs = AUTO_SYNC_INTERVAL_MS): Promise<v
     const last = await getLastSyncTime();
     if (last && Date.now() - new Date(last).getTime() < maxAgeMs) return;
     await syncStudents({ photos: false });
-  } catch (e) {
+    await setLastSyncError(null);
+  } catch (e: any) {
     console.warn('Auto-sync failed (will retry later):', e);
+    // Not surfaced via a dialog (this runs silently in the background), but
+    // recorded so the home screen can show a prominent banner until the next
+    // sync succeeds — otherwise a network outage fails invisibly forever.
+    await setLastSyncError(e?.message || 'Sync failed — check network connection');
   } finally {
     _autoSyncing = false;
   }

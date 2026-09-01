@@ -5,7 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { consumePendingConfirmation, type ConfirmKind } from '@/services/confirmation';
 import { flushLogs, getPendingCount } from '@/services/log-queue';
-import { getCheckedIn, getDeployedAmenity, getLastSyncTime, getTodayStats } from '@/services/storage';
+import { getCheckedIn, getDeployedAmenity, getLastSyncError, getLastSyncTime, getTodayStats } from '@/services/storage';
 
 function fmtAgo(iso: string | null): string {
   if (!iso) return 'never';
@@ -25,6 +25,7 @@ export default function HomeScreen() {
   const [insideCount, setInsideCount] = useState(0);
   const [todayIn, setTodayIn] = useState(0);
   const [lastSync, setLastSync] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [pending, setPending] = useState(0);
   const [confirm, setConfirm] = useState<{ kind: ConfirmKind; message: string } | null>(null);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -35,6 +36,7 @@ export default function HomeScreen() {
       getCheckedIn().then((list) => setInsideCount(list.length));
       getTodayStats().then((s) => setTodayIn(s.in));
       getLastSyncTime().then(setLastSync);
+      getLastSyncError().then(setSyncError);
       getPendingCount().then(setPending);
 
       // A background flush clears the queue a moment after a check-in, so a
@@ -89,6 +91,14 @@ export default function HomeScreen() {
           <Text style={styles.insidePillText}>👥 {insideCount} INSIDE</Text>
         </View>
       </TouchableOpacity>
+
+      {syncError && (
+        <TouchableOpacity style={styles.syncErrorBanner} activeOpacity={0.85} onPress={() => router.push('/admin')}>
+          <Text style={styles.syncErrorText} numberOfLines={2}>
+            ⚠ SYNC FAILED — {syncError} — tap to open Admin and retry
+          </Text>
+        </TouchableOpacity>
+      )}
 
       <View style={styles.statsRow}>
         <View style={styles.statCard}>
@@ -165,6 +175,8 @@ const styles = StyleSheet.create({
   amenityText: { fontSize: 13, fontWeight: '700', color: '#475569', letterSpacing: 1 },
   amenityName: { color: '#208AEF', fontWeight: '900' },
   amenityWarn: { fontSize: 12, fontWeight: '900', color: '#D97706', letterSpacing: 0.5 },
+  syncErrorBanner: { backgroundColor: '#DC2626', paddingVertical: 10, paddingHorizontal: 16 },
+  syncErrorText: { color: '#FFFFFF', fontSize: 12, fontWeight: '900', textAlign: 'center', letterSpacing: 0.3 },
   insidePill: { backgroundColor: '#208AEF', paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14 },
   insidePillText: { color: '#FFFFFF', fontSize: 12, fontWeight: '900', letterSpacing: 0.5 },
   statsRow: { flexDirection: 'row', paddingHorizontal: 16, paddingTop: 14, gap: 10 },

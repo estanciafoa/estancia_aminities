@@ -99,7 +99,9 @@ older resident-phone Payment-Link page (`doGet` default + `confirm` callback + `
 are hardcoded** in the `PACKAGES_` array (per category Student/Family × amenity combination) — edit
 there, no sheet needed. Razorpay keys are read from **Script Properties** (`RAZORPAY_KEY_ID` /
 `RAZORPAY_KEY_SECRET` via `PropertiesService`), so the file carries no secret and is safe to commit.
-A new web app (deploy separately, Execute as Me / Anyone). A resident opens its
+A new web app (**deploy in its OWN Apps Script project — never together with
+`subscription-writer.gs`; both define doGet/doPost and would shadow each other, making one `/exec`
+serve the wrong app**; Execute as Me / Anyone). A resident opens its
 `/exec` URL on their **own** phone (post the URL / a QR at each gate), picks a
 **package** + month, enters flat + name, sees the price, and taps Pay. It creates
 a **Razorpay Payment Link** server-side (key secret stays in the script) and hands
@@ -141,11 +143,15 @@ between its start and the trailing columns (restoring the comma) — so classifi
 correct. The preview shows only matched rows; unrecognized ("other")
 rows are dropped from the preview and skipped on push (header shows an "N skipped" tally). Before
 each batch, **duplicates are automatically dropped, not prompted** (`dedupeRows` + `existing_keys`
-action) — key = **APT NO. + AMENITY USER + Month** (identifies the same subscription regardless of
-which statement it came from; the S.No. differs per statement so it is NOT in the key, else the same
-person re-appears from a second file). The server derives Month from the Payment Description text
-(the Month cell is date-coerced by Sheets). **Redeploy `subscription-writer.gs`** after any key
-change so the sheet-side check matches the client. Target sheet
+action) — key = **APT NO. + NAME OF CLIENT + AMENITY USER + Month + Amount** (the unique-subscription
+key: identifies the same subscription regardless of which statement it came from; the S.No. differs
+per statement and the Payment Description is free text, so NEITHER is in the key — two rows collapse
+only when person + month + amount all match, and rows differing in amount are kept). The client
+`rowKey` (admin.html) and server `normKey_` (subscription-writer.gs) **must stay identical** or the
+sheet-side check never matches and every upload re-inserts the whole statement (this bug once left
+up to 9 copies of each row; the one-time `dedupe_tab` action on the same key cleaned it). The server
+derives Month from the Payment Description text (the Month cell is date-coerced by Sheets). **Redeploy
+`subscription-writer.gs`** after any key change so the sheet-side check matches the client. Target sheet
 `1OhbhJPxep0s5eQKmakgmSjJBIMDEzSN3iRXuGMaOCng`; tab gids gym `2051574635`, swimming `1433427596`,
 tennis `2028550937`, combo `1913121077`. Columns: `S.No. | APT NO. | NAME OF CLIENT | AMENITY USER
 | Month | Amount | Payment Description` (AMENITY USER + Month are parsed out of the bank

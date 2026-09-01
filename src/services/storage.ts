@@ -233,8 +233,23 @@ export async function setLastSyncTime(time: string): Promise<void> {
   await AsyncStorage.setItem(LAST_SYNC_KEY, time);
 }
 
+// Sticks around until the NEXT successful sync (manual or background), so a
+// failed background sync isn't silently lost — the home screen shows it as a
+// prominent banner until it clears itself.
+const LAST_SYNC_ERROR_KEY = '@estancia_amenities_last_sync_error';
+
+export async function getLastSyncError(): Promise<string | null> {
+  return await AsyncStorage.getItem(LAST_SYNC_ERROR_KEY);
+}
+
+/** Pass null to clear (call this on every successful sync). */
+export async function setLastSyncError(message: string | null): Promise<void> {
+  if (message) await AsyncStorage.setItem(LAST_SYNC_ERROR_KEY, message);
+  else await AsyncStorage.removeItem(LAST_SYNC_ERROR_KEY);
+}
+
 export async function clearLocalStudents(): Promise<void> {
-  await AsyncStorage.multiRemove([STUDENTS_KEY, ROSTER_KEY, FAMILY_ROSTER_KEY, LAST_SYNC_KEY]);
+  await AsyncStorage.multiRemove([STUDENTS_KEY, ROSTER_KEY, FAMILY_ROSTER_KEY, LAST_SYNC_KEY, LAST_SYNC_ERROR_KEY]);
   _cache = null;
   _roster = null;
   _familyRoster = null;
@@ -401,10 +416,11 @@ export async function rememberFamilyMember(
   await AsyncStorage.setItem(FAMILY_HISTORY_KEY, JSON.stringify(history));
 }
 
-// ---- Family roster (synced from an optional "Family Members" sheet tab) ----
-// Pre-seeds the per-flat family list (with gender) so a freshly-installed device
-// shows residents before anyone has checked in. Merged with the local history
-// and the subscription names in getFamilySuggestions().
+// ---- Family roster (synced from attendance-log check-in history) ----
+// Pre-seeds the per-flat family list (with gender) so a freshly-installed
+// device shows residents before anyone has checked in on it. Built from the
+// attendance log: every Category=Family row, grouped by Flat No, unique
+// Names per flat — merged with the local history in getFamilySuggestions().
 
 const FAMILY_ROSTER_KEY = '@estancia_amenities_family_roster';
 
@@ -438,14 +454,10 @@ export async function saveFamilyRoster(
 
 /**
  * Family members to offer for a flat, merged from two sources and de-duped by
- * (normalized) name: the synced Family Members roster (has gender) and
- * locally-remembered check-ins (has gender). Gender precedence: roster > history.
- *
- * We deliberately do NOT seed from the subscription rows: on a family flat the
- * subscription name is the OWNER who paid the fee, not the family members who
- * actually check in. So the resident picks a previously-used name or types a new
- * one (remembered for next time). Family gating is by flat-paid-this-month, so
- * the chosen name never affects whether entry is allowed.
+ * (normalized) name: the synced roster (has gender — built from attendance-log
+ * check-in history, NOT the subscription payer name, since the payer isn't
+ * necessarily who checks in) and locally-remembered check-ins on this device
+ * (has gender). Gender precedence: roster > history.
  */
 export async function getFamilySuggestions(flat: string): Promise<FamilyMember[]> {
   const key = flat.trim().toLowerCase();
