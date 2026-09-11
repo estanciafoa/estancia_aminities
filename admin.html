@@ -1006,6 +1006,12 @@
       // drop Month (AMENITY USER is kept), renumber S.No. The billing month is
       // read from each row's Payment Description (robust to Sheets date-coercing
       // the Month cell), matching the picked "Jul 2026".
+      //
+      // Also drops duplicate rows (same key as rowKey/normKey_: APT NO. + NAME
+      // OF CLIENT + AMENITY USER + Month + Amount) so a sheet that's picked up
+      // duplicates — e.g. the upload's existing_keys check having failed open —
+      // still produces a clean bank report. Sheet rows are newest-first
+      // (insertRowsBefore(2, …)), so the first occurrence of a key is kept.
       async function fetchAmenity(gid, wantMonth) {
         const url = ENDPOINT + '?action=get_rows&token=' + encodeURIComponent(TOKEN)
           + '&ssId=' + encodeURIComponent(SHEET_ID) + '&gid=' + encodeURIComponent(gid);
@@ -1013,17 +1019,23 @@
         const data = JSON.parse(await res.text());
         if (!data.ok) throw new Error(data.error || 'read failed');
         const out = [];
-        let seq = 0;
+        const seen = new Set();
+        let seq = 0, dupSkipped = 0;
         (data.result.rows || []).forEach((r) => {
           const desc = r['Payment Description'] != null ? String(r['Payment Description']) : '';
           const m = extractMonth(desc) || extractMonth(String(r['Month'] == null ? '' : r['Month']));
           if (m !== wantMonth) return;
+          const apt = r['APT NO.'] == null ? '' : r['APT NO.'];
+          const name = r['NAME OF CLIENT'] == null ? '' : r['NAME OF CLIENT'];
+          const user = r['AMENITY USER'] == null ? '' : r['AMENITY USER'];
+          const amount = toNum(r['Amount']);
+          const key = [apt, name, user, m, amount].map((v) => String(v).trim().toLowerCase()).join('|');
+          if (seen.has(key)) { dupSkipped++; return; }
+          seen.add(key);
           seq++;
-          out.push([seq, r['APT NO.'] == null ? '' : r['APT NO.'],
-            r['NAME OF CLIENT'] == null ? '' : r['NAME OF CLIENT'],
-            r['AMENITY USER'] == null ? '' : r['AMENITY USER'], toNum(r['Amount']), desc]);
+          out.push([seq, apt, name, user, amount, desc]);
         });
-        return out;
+        return { rows: out, dupSkipped };
       }
 
       // The Gas tab: read the month's gas-reading tab and rebuild the bank
@@ -1080,16 +1092,18 @@
           ]);
           const wb = XLSX.utils.book_new();
           XLSX.utils.book_append_sheet(wb, sheetFrom(gas.rows, GAS_HEADER), 'Gas');
-          XLSX.utils.book_append_sheet(wb, sheetFrom(gym), 'Gym');
-          XLSX.utils.book_append_sheet(wb, sheetFrom(swim), 'Swim');
-          XLSX.utils.book_append_sheet(wb, sheetFrom(tennis), 'Tennis');
-          XLSX.utils.book_append_sheet(wb, sheetFrom(combo), 'Combo');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(gym.rows), 'Gym');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(swim.rows), 'Swim');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(tennis.rows), 'Tennis');
+          XLSX.utils.book_append_sheet(wb, sheetFrom(combo.rows), 'Combo');
           const fname = 'Bank Report - ' + pretty + '.xlsx';
           XLSX.writeFile(wb, fname);
-          const total = gas.rows.length + gym.length + swim.length + tennis.length + combo.length;
-          let note = '✓ ' + fname + ' — Gas ' + gas.rows.length + ' · Gym ' + gym.length
-            + ' · Swim ' + swim.length + ' · Tennis ' + tennis.length + ' · Combo ' + combo.length
+          const total = gas.rows.length + gym.rows.length + swim.rows.length + tennis.rows.length + combo.rows.length;
+          const dupSkipped = gym.dupSkipped + swim.dupSkipped + tennis.dupSkipped + combo.dupSkipped;
+          let note = '✓ ' + fname + ' — Gas ' + gas.rows.length + ' · Gym ' + gym.rows.length
+            + ' · Swim ' + swim.rows.length + ' · Tennis ' + tennis.rows.length + ' · Combo ' + combo.rows.length
             + ' (' + total + ' rows).';
+          if (dupSkipped) note += '  ⚠ Skipped ' + dupSkipped + ' duplicate row(s) found in the sheet(s).';
           if (gas.missing) note += '  ⚠ No "' + pretty + '" gas tab — Gas is empty.';
           setMsg(note, total ? 'ok' : 'warn');
         } catch (e) {
