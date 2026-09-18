@@ -33,6 +33,7 @@ function doGet(e) {
   try {
     if (p.action === 'existing_keys') return existingKeys_(p);
     if (p.action === 'get_rows') return getRows_(p);
+    if (p.action === 'get_rows_multi') return getRowsMulti_(p);
   } catch (err) {
     return jsonResponse_(false, null, err && err.message ? err.message : String(err));
   }
@@ -232,6 +233,112 @@ function getRows_(p) {
     rows.push(obj);
   }
   return jsonResponse_(true, { rows: rows }, null);
+}
+
+// Read SEVERAL tabs of one spreadsheet in ONE execution, filtered to one
+// billing month, and return positional arrays instead of per-row objects.
+//
+// This exists because the bank report needs four tabs at once: doing that as
+// four `get_rows` calls meant four concurrent executions (all `Execute as = Me`,
+// so they queue against one identity), four openById() calls on the SAME
+// spreadsheet, and the whole multi-year history shipped so the browser could
+// throw ~70% of it away. Measured on the live sheet: 1145 rows / 280 KB / 4
+// requests became 368 rows / 47 KB / 1 request.
+//
+// `get_rows` above is UNCHANGED and still object-shaped — src/services/sheets.ts
+// depends on it. This is an additional action, not a replacement.
+//
+// Params: gids (comma-separated), month ("Aug 2026", optional — omit for all
+// rows), ssId, token.
+// Returns { header, tabs: { <gid>: { rows: [[...]], dupSkipped } } }, where each
+// row is [S.No., APT NO., NAME OF CLIENT, AMENITY USER, Amount, Payment
+// Description] with S.No. renumbered from 1 — the bank workbook's column order.
+function getRowsMulti_(p) {
+  validateToken_(p.token);
+  if (!p.ssId) throw new Error('ssId is required');
+  if (!p.gids) throw new Error('gids is required');
+
+  var ss = SpreadsheetApp.openById(p.ssId); // once, not once per tab
+  var wantMonth = String(p.month || '').trim();
+  var gids = String(p.gids).split(',');
+  var tabs = {};
+
+  for (var t = 0; t < gids.length; t++) {
+    var gid = String(gids[t]).trim();
+    if (!gid) continue;
+    tabs[gid] = readTabRows_(resolveSheet_(ss, gid), wantMonth);
+  }
+  return jsonResponse_(true, { header: BANK_HEADER_, tabs: tabs }, null);
+}
+
+var BANK_HEADER_ = ['S.No.', 'APT NO.', 'NAME OF CLIENT', 'AMENITY USER', 'Amount', 'Payment Description'];
+
+// One tab -> this month's rows, deduped and renumbered. Columns are located by
+// header name with the same fallbacks as existingKeys_, so a tab whose columns
+// drift still reads. The dedupe key is normKey_ (APT NO. + NAME + AMENITY USER
+// + Month + Amount) — identical to the client's rowKey; rows are newest-first
+// (insertRowsBefore(2, ...)), so the first occurrence of a key wins.
+function readTabRows_(sheet, wantMonth) {
+  var last = sheet.getLastRow();
+  if (last < 2) return { rows: [], dupSkipped: 0 };
+
+  var width = Math.max(sheet.getLastColumn(), 7);
+  var all = sheet.getRange(1, 1, last, width).getValues();
+  var header = all[0].map(function (h) { return String(h).trim().toLowerCase(); });
+  function findCol(names, fallback) {
+    for (var i = 0; i < header.length; i++) {
+      for (var j = 0; j < names.length; j++) {
+        if (header[i] === names[j]) return i;
+      }
+    }
+    return fallback;
+  }
+  var iApt = findCol(['apt no.', 'apt no', 'flat no.', 'flat no', 'flat', 'usn'], 1);
+  var iName = findCol(['name of client', 'name'], 2);
+  var iUser = findCol(['amenity user', 'aminity user', 'amenity user name'], 3);
+  var iAmount = findCol(['amount', 'amt'], 5);
+  var iDesc = findCol(['payment description', 'payment desription', 'description', 'head'], 6);
+  var iMonthCell = findCol(['month'], 4);
+
+  var rows = [], seen = {}, dupSkipped = 0, seq = 0;
+  for (var r = 1; r < all.length; r++) {
+    var desc = all[r][iDesc] == null ? '' : String(all[r][iDesc]);
+    var month = monthFromText_(desc) || monthFromCell_(all[r][iMonthCell]);
+    if (wantMonth && month !== wantMonth) continue;
+
+    var apt = all[r][iApt] == null ? '' : all[r][iApt];
+    var name = all[r][iName] == null ? '' : all[r][iName];
+    var user = all[r][iUser] == null ? '' : all[r][iUser];
+    var amount = toNum_(all[r][iAmount]);
+
+    var key = normKey_(apt, name, user, month, amount);
+    if (seen[key]) { dupSkipped++; continue; }
+    seen[key] = true;
+    rows.push([++seq, apt, name, user, amount, desc]);
+  }
+  return { rows: rows, dupSkipped: dupSkipped };
+}
+
+// The Month cell, when the Payment Description has no month in it. Sheets
+// coerces that column to a Date, and Apps Script hands it back as a Date object
+// whose String() form is "Mon Aug 01 2026 ..." — monthFromText_ reads the "01"
+// as the year and returns "Aug 2001". Format it instead. (admin.html could
+// never use this fallback at all: over JSON the cell arrived as an ISO string,
+// which matches no month pattern, so these rows silently fell out of every
+// report.) Plain text in the cell still goes through monthFromText_.
+function monthFromCell_(v) {
+  if (v == null || v === '') return '';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    return Utilities.formatDate(v, Session.getScriptTimeZone(), 'MMM yyyy');
+  }
+  return monthFromText_(String(v));
+}
+
+// "Rs. 1,300.00" -> 1300. Left as-is when there's no number to find, matching
+// admin.html's toNum so the dedupe key is byte-identical on both sides.
+function toNum_(v) {
+  var n = Number(String(v == null ? '' : v).replace(/[^0-9.\-]/g, ''));
+  return isNaN(n) ? v : n;
 }
 
 // Unique-subscription key: APT NO. + NAME OF CLIENT + AMENITY USER + Month +

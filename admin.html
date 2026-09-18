@@ -270,6 +270,55 @@
       tennis:   '2028550937',
       combo:    '1913121077',
     };
+    // ---- Talking to Apps Script --------------------------------------------
+    // A /exec URL answers with HTML — never JSON — for a whole class of
+    // failures: a multi-account Google session bouncing the googleusercontent
+    // redirect through an account chooser, a script timeout or quota trip
+    // (served as a styled page, with HTTP 200), or a deployment that was
+    // replaced instead of versioned. A bare JSON.parse then surfaces
+    // "Unexpected token '<', "<!DOCTYPE "... is not valid JSON", which names
+    // none of those. Sniff the page and say which one it is.
+    //
+    // Returns data.result; throws on a server-side rejection with the error
+    // text also on err.serverError, for callers that branch on it.
+    async function readReply(res) {
+      const text = await res.text();
+      if (/^\s*[<\uFEFF]/.test(text)) {
+        const head = text.slice(0, 1500);
+        if (/accounts\.google\.com|Choose an account|ServiceLogin|Sign in - Google/i.test(head)) {
+          throw new Error('Google returned a sign-in page. You are signed into more than one '
+            + 'Google account — open the /exec URL directly in this browser once, pick the '
+            + 'account that owns the sheet, then retry.');
+        }
+        if (/Pay|Razorpay|estancia-amenities-payments/i.test(head) && /<form|razorpay/i.test(head)) {
+          throw new Error('That deployment is serving the Razorpay payment page, not the writer — '
+            + 'the two scripts are in one Apps Script project and their doGet handlers collide. '
+            + 'Split them into two projects.');
+        }
+        if (/exceeded|too many times|maximum execution time|quota/i.test(head)) {
+          throw new Error('Apps Script hit an execution limit (timeout or quota) — wait a minute and retry.');
+        }
+        if (/Sorry, unable to open|Script function not found|not found/i.test(head)) {
+          throw new Error('The deployment URL is stale — redeploy via Manage deployments ▸ edit ▸ '
+            + 'New version (do not create a new deployment) and update the URL here.');
+        }
+        throw new Error('Apps Script returned an HTML page instead of JSON (HTTP ' + res.status + ').');
+      }
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (_) {
+        throw new Error('Unreadable reply from Apps Script (HTTP ' + res.status + '): '
+          + text.slice(0, 120));
+      }
+      if (!data.ok) {
+        const err = new Error(data.error || 'server rejected');
+        err.serverError = data.error || '';
+        throw err;
+      }
+      return data.result || {};
+    }
+
     const TARGET_HEADERS = ['S.No.', 'APT NO.', 'NAME OF CLIENT', 'AMENITY USER', 'Month', 'Amount', 'Payment Description'];
     const MONTHS = { jan: 'Jan', feb: 'Feb', mar: 'Mar', apr: 'Apr', may: 'May', jun: 'Jun', jul: 'Jul', aug: 'Aug', sep: 'Sep', oct: 'Oct', nov: 'Nov', dec: 'Dec' };
 
@@ -685,9 +734,8 @@
         + '&ssId=' + encodeURIComponent(SHEET_ID)
         + '&gid=' + encodeURIComponent(gid);
       const res = await fetch(url, { redirect: 'follow' });
-      const data = JSON.parse(await res.text());
-      if (!data.ok) throw new Error(data.error || 'read failed');
-      return new Set((data.result.keys || []).map((k) => String(k).trim().toLowerCase()));
+      const result = await readReply(res);
+      return new Set((result.keys || []).map((k) => String(k).trim().toLowerCase()));
     }
 
     // Drop rows that duplicate each other (within the batch) or already exist in
@@ -1002,40 +1050,45 @@
         return t;
       }
 
-      // One amenity tab: read the subscription sheet, keep only this month's rows,
-      // drop Month (AMENITY USER is kept), renumber S.No. The billing month is
-      // read from each row's Payment Description (robust to Sheets date-coercing
-      // the Month cell), matching the picked "Jul 2026".
+      // ALL FOUR amenity tabs in ONE request. The server (get_rows_multi) opens
+      // the spreadsheet once, keeps only this month's rows, drops duplicates and
+      // renumbers S.No., then returns positional arrays in the bank workbook's
+      // column order — so there is nothing left to do here but read the reply.
       //
-      // Also drops duplicate rows (same key as rowKey/normKey_: APT NO. + NAME
-      // OF CLIENT + AMENITY USER + Month + Amount) so a sheet that's picked up
-      // duplicates — e.g. the upload's existing_keys check having failed open —
-      // still produces a clean bank report. Sheet rows are newest-first
-      // (insertRowsBefore(2, …)), so the first occurrence of a key is kept.
-      async function fetchAmenity(gid, wantMonth) {
-        const url = ENDPOINT + '?action=get_rows&token=' + encodeURIComponent(TOKEN)
-          + '&ssId=' + encodeURIComponent(SHEET_ID) + '&gid=' + encodeURIComponent(gid);
+      // This used to be four parallel `get_rows` calls, one per tab. Each was a
+      // separate Apps Script execution; because the deployment runs as
+      // `Execute as = Me` they queued against a single identity, and that
+      // queuing was what intermittently timed out and came back as an HTML error
+      // page ("Unexpected token '<'"). It also shipped every month of history so
+      // this function could discard ~70% of it: 1145 rows / 280 KB / 4 requests,
+      // measured, versus 368 rows / 47 KB / 1 request now.
+      //
+      // The billing month is still read from each row's Payment Description
+      // first (robust to Sheets date-coercing the Month cell), falling back to
+      // the Month cell — server-side now, via the same monthFromText_.
+      async function fetchAmenities(wantMonth) {
+        const gids = [TABS.gym, TABS.swimming, TABS.tennis, TABS.combo];
+        const url = ENDPOINT + '?action=get_rows_multi&token=' + encodeURIComponent(TOKEN)
+          + '&ssId=' + encodeURIComponent(SHEET_ID)
+          + '&gids=' + encodeURIComponent(gids.join(','))
+          + '&month=' + encodeURIComponent(wantMonth);
         const res = await fetch(url, { redirect: 'follow' });
-        const data = JSON.parse(await res.text());
-        if (!data.ok) throw new Error(data.error || 'read failed');
-        const out = [];
-        const seen = new Set();
-        let seq = 0, dupSkipped = 0;
-        (data.result.rows || []).forEach((r) => {
-          const desc = r['Payment Description'] != null ? String(r['Payment Description']) : '';
-          const m = extractMonth(desc) || extractMonth(String(r['Month'] == null ? '' : r['Month']));
-          if (m !== wantMonth) return;
-          const apt = r['APT NO.'] == null ? '' : r['APT NO.'];
-          const name = r['NAME OF CLIENT'] == null ? '' : r['NAME OF CLIENT'];
-          const user = r['AMENITY USER'] == null ? '' : r['AMENITY USER'];
-          const amount = toNum(r['Amount']);
-          const key = [apt, name, user, m, amount].map((v) => String(v).trim().toLowerCase()).join('|');
-          if (seen.has(key)) { dupSkipped++; return; }
-          seen.add(key);
-          seq++;
-          out.push([seq, apt, name, user, amount, desc]);
-        });
-        return { rows: out, dupSkipped };
+        const result = await readReply(res);
+        if (!result.tabs) {
+          throw new Error('Subscription Apps Script not updated (get_rows_multi missing) — '
+            + 'redeploy a new version.');
+        }
+        // Amounts are numbers off the wire; toNum is kept for a tab whose Amount
+        // column still holds "Rs. 1,300.00" text the server left alone.
+        const pick = (gid) => {
+          const t = result.tabs[String(gid)] || { rows: [], dupSkipped: 0 };
+          return {
+            rows: (t.rows || []).map((r) => [r[0], r[1], r[2], r[3], toNum(r[4]), r[5]]),
+            dupSkipped: t.dupSkipped || 0,
+          };
+        };
+        return { gym: pick(TABS.gym), swim: pick(TABS.swimming),
+          tennis: pick(TABS.tennis), combo: pick(TABS.combo) };
       }
 
       // The Gas tab: read the month's gas-reading tab and rebuild the bank
@@ -1049,27 +1102,29 @@
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'get_month_rows', token, ssId: GAS_SHEET_ID, monthName: MONTH_NAMES[monthIdx] + ' ' + year }),
         });
-        const data = JSON.parse(await res.text());
-        if (!data.ok) {
+        let result;
+        try {
+          result = await readReply(res);
+        } catch (e) {
           // A stale/wrong gas token is otherwise stuck in localStorage with no
           // way back — drop it so the next attempt re-prompts (mirrors the GAS
           // READING tab's "Change admin token"). The token is shared by both.
-          if (/token/i.test(data.error || '')) {
+          if (/token/i.test(e.serverError || '')) {
             localStorage.removeItem('gasAdminToken');
             throw new Error('Gas token rejected — cleared it; click download again to re-enter the correct token.');
           }
-          throw new Error(data.error || 'gas read failed');
+          throw e;
         }
-        const gross = data.result.gross, short = SHORT[monthIdx], yy = String(year).slice(-2);
+        const gross = result.gross, short = SHORT[monthIdx], yy = String(year).slice(-2);
         const out = [];
         let seq = 0;
-        (data.result.rows || []).forEach((r) => {
+        (result.rows || []).forEach((r) => {
           seq++;
           out.push([seq, r.apt, r.name, r.amount,
             short + "'" + yy + " - Gas Payment for Flat No. " + r.apt,
             " towards  " + round2(r.kg) + " kg Consumption ( Rs." + gross + "/kg inclusive of 5% GST )"]);
         });
-        return { rows: out, missing: !!data.result.tabMissing };
+        return { rows: out, missing: !!result.tabMissing };
       }
 
       function sheetFrom(rows, header) { return XLSX.utils.aoa_to_sheet([header || AMENITY_HEADER, ...rows]); }
@@ -1083,13 +1138,15 @@
         btn.textContent = 'BUILDING…';
         setMsg('Reading live sheets for ' + pretty + '…', '');
         try {
-          const [gas, gym, swim, tennis, combo] = await Promise.all([
+          // Two requests, and they can safely run together: they hit two
+          // different deployments (subscription writer vs. meter reader), so
+          // they don't queue behind each other the way four calls to one
+          // deployment did.
+          const [gas, amenities] = await Promise.all([
             fetchGas(monthIdx, year),
-            fetchAmenity(TABS.gym, wantMonth),
-            fetchAmenity(TABS.swimming, wantMonth),
-            fetchAmenity(TABS.tennis, wantMonth),
-            fetchAmenity(TABS.combo, wantMonth),
+            fetchAmenities(wantMonth),
           ]);
+          const { gym, swim, tennis, combo } = amenities;
           const wb = XLSX.utils.book_new();
           XLSX.utils.book_append_sheet(wb, sheetFrom(gas.rows, GAS_HEADER), 'Gas');
           XLSX.utils.book_append_sheet(wb, sheetFrom(gym.rows), 'Gym');
